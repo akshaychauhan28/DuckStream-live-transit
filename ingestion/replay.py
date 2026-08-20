@@ -33,8 +33,11 @@ Design questions to resolve before writing:
   2. Two timestamps, and they are not the same thing.
      meta["fetched_at"] is when you polled.
      entity.vehicle.timestamp is when the VEHICLE last reported.
-     These can differ by minutes. Which one is "the" event time, and which
-     one does dedupe key on? Getting this wrong is the day-19 bug.
+     Measured on real data: median gap 13s, p90 21s, max 637s — so they agree
+     closely for most vehicles and diverge badly for a small tail. Which one is
+     "the" event time, and which does dedupe key on? Getting this wrong is the
+     day-19 bug, and the stale tail is exactly where it will show up.
+     See docs/FEED_NOTES.md.
 
   3. Idempotency. If you replay the same file twice, does the downstream end up
      with duplicates? Where should that be prevented — here, or in the consumer?

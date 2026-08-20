@@ -83,9 +83,20 @@ du -sh ~/duckstream-raw
 ls -lt ~/duckstream-raw | head
 ```
 
-Expect very roughly 100–250 MB/day at 30s polling, so ~3–8 GB over 30 days —
-but measure your first real day rather than trusting that estimate, since it
-depends entirely on fleet size and payload verbosity.
+Measured against real payloads on 2026-08-20 (503 vehicles, 676 trip updates):
+
+| Polling | Per day | Over 30 days |
+|---|---|---|
+| Both feeds at 30s | ~341 MB | ~10.2 GB |
+| Both feeds at 60s | ~171 MB | ~5.1 GB |
+| VP 30s + TU 120s | ~112 MB | ~3.4 GB |
+
+TripUpdates is ~105 KB gzipped per poll against VehiclePositions' ~12.5 KB, so
+it is roughly 89% of the archive. That's where the tuning lever is — see
+docs/DECISIONS.md #9.
+
+These are real numbers, but they're from a single evening snapshot. Fleet size
+varies by time of day, so measure your own first full day before sizing disk.
 
 Once you've rsynced files down and verified them, deleting the VM-side copies
 older than a few days keeps the disk clear.

@@ -161,3 +161,48 @@ idiomatic ones.
 
 Versions are unpinned during Phase 1; pin with `pip freeze` once the pipeline is
 stable so the archive stays reproducible.
+
+---
+
+## 9. TripUpdates poll interval — **OPEN, decide before continuous capture**
+
+Measured 2026-08-20: TripUpdates is ~106 KB gzipped per poll against
+VehiclePositions' ~12.5 KB. It is **~89% of the archive by size**.
+
+| Polling | Per day | 30 days |
+|---|---|---|
+| Both at 30s | ~341 MB | ~10.2 GB |
+| Both at 60s | ~171 MB | ~5.1 GB |
+| VP 30s + TU 120s | ~112 MB | ~3.4 GB |
+
+The tradeoff: VehiclePositions at 30s is what gives trajectory resolution for
+deriving speed and dwell time. TripUpdates carries predicted arrival times,
+which do not change meaningfully within 30s — so slowing it is the cheap lever.
+
+`capture.py` now supports per-feed intervals
+(`CAPTURE_INTERVAL_TRIP_UPDATES_SECONDS`). Both default to 30s; nothing is
+imposed. **Your call**, and worth making deliberately, because the archive
+cannot be re-collected at a higher resolution later.
+
+---
+
+## 10. Delay must be derived — static GTFS is a hard dependency
+
+**Measured, not assumed:** across 14,189 arrival predictions in a real
+TripUpdates payload, **100% carry `arrival.time` and 0% carry `arrival.delay`.**
+
+The feed reports *when a bus is predicted to arrive*, never *how late it is*.
+So:
+
+    delay = predicted_arrival_time (feed) - scheduled_arrival_time (static GTFS)
+
+There is no route to a delay figure that avoids static GTFS. This changes its
+status from "important, adds human-readable names" to **a prerequisite for the
+project's central analysis**. Phase 2 should treat it as blocking, not
+supporting.
+
+It also makes the versioning problem load-bearing: joining September's
+observations against October's schedule produces numbers that are wrong but
+never error. See `ingestion/static_gtfs.py`.
+
+Full field coverage in [FEED_NOTES.md](FEED_NOTES.md).

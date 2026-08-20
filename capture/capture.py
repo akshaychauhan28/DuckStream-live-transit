@@ -49,6 +49,26 @@ FEEDS = {
 
 REQUEST_TIMEOUT_SECONDS = 20
 
+# Per-feed poll intervals, in seconds.
+#
+# Measured 2026-08-20 on real payloads: TripUpdates is ~105KB gzipped per poll
+# against VehiclePositions' ~12.5KB, so TripUpdates is ~89% of the archive by
+# size. Its signal (predicted arrival times) does not change meaningfully in
+# 30s, whereas VehiclePositions at 30s is what gives trajectory resolution for
+# speed derivation. So TripUpdates is the natural place to trade resolution for
+# disk if you need to.
+#
+#   both at 30s            -> ~341 MB/day  -> ~10.2 GB over 30 days
+#   VP 30s + TU 120s       -> ~112 MB/day  ->  ~3.4 GB over 30 days
+#
+# CAPTURE_INTERVAL_SECONDS sets the default for every feed; the per-feed
+# variables override it.
+DEFAULT_INTERVAL = 30
+INTERVAL_ENV = {
+    "vehicle_positions": "CAPTURE_INTERVAL_VEHICLE_POSITIONS_SECONDS",
+    "trip_updates": "CAPTURE_INTERVAL_TRIP_UPDATES_SECONDS",
+}
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -147,7 +167,11 @@ def main() -> int:
                   "and fill it in, or export it in the environment.")
         return 1
 
-    interval = int(os.environ.get("CAPTURE_INTERVAL_SECONDS", "30"))
+    base_interval = int(os.environ.get("CAPTURE_INTERVAL_SECONDS", str(DEFAULT_INTERVAL)))
+    intervals = {
+        name: int(os.environ.get(INTERVAL_ENV[name], str(base_interval)))
+        for name in FEEDS
+    }
     output_dir = Path(os.environ.get("CAPTURE_OUTPUT_DIR", "./raw"))
 
     signal.signal(signal.SIGINT, _handle_signal)
@@ -156,51 +180,55 @@ def main() -> int:
     writer = HourlyWriter(output_dir)
     session = requests.Session()
 
-    log.info("capture starting: interval=%ss output=%s feeds=%s",
-             interval, output_dir.resolve(), ", ".join(FEEDS))
+    log.info("capture starting: output=%s intervals=%s",
+             output_dir.resolve(),
+             ", ".join(f"{n}={intervals[n]}s" for n in FEEDS))
 
-    # Schedule against a monotonic clock so ticks don't drift later and later
-    # as request latency accumulates.
-    next_tick = time.monotonic()
-    ticks = 0
+    # Each feed keeps its own schedule against a monotonic clock, so ticks don't
+    # drift later and later as request latency accumulates, and so the two feeds
+    # can run at different rates.
+    next_due = {name: time.monotonic() for name in FEEDS}
+    polls = {name: 0 for name in FEEDS}
 
     try:
         while not _shutdown:
-            now = datetime.now(timezone.utc)
-            try:
-                fh = writer.handle(now)
-                for name, url in FEEDS.items():
-                    meta, body = fetch(session, name, url, key)
-                    write_frame(fh, meta, body)
-                    if meta.get("status") != 200:
-                        log.warning("%s: status=%s %s", name, meta.get("status"),
-                                    meta.get("error") or meta.get("error_body", ""))
-                fh.flush()
-            except Exception:
-                # The loop itself must survive anything — a full disk, a
-                # permissions change, a bad clock. Log it and take the next tick.
-                log.exception("tick failed")
+            now_mono = time.monotonic()
+            due = [n for n in FEEDS if next_due[n] <= now_mono]
 
-            ticks += 1
-            if ticks % 120 == 0:  # roughly hourly at a 30s interval
-                log.info("heartbeat: %s ticks completed", ticks)
+            if due:
+                try:
+                    fh = writer.handle(datetime.now(timezone.utc))
+                    for name in due:
+                        meta, body = fetch(session, name, FEEDS[name], key)
+                        write_frame(fh, meta, body)
+                        polls[name] += 1
+                        if meta.get("status") != 200:
+                            log.warning("%s: status=%s %s", name, meta.get("status"),
+                                        meta.get("error") or meta.get("error_body", ""))
+                    fh.flush()
+                except Exception:
+                    # The loop itself must survive anything — a full disk, a
+                    # permissions change, a bad clock. Log and take the next tick.
+                    log.exception("tick failed")
 
-            next_tick += interval
-            sleep_for = next_tick - time.monotonic()
-            if sleep_for < 0:
-                # We fell behind (slow API, disk stall). Resync rather than
-                # trying to catch up with a burst of requests against a quota.
-                log.warning("behind schedule by %.1fs, resyncing", -sleep_for)
-                next_tick = time.monotonic()
-                sleep_for = 0
-            # Sleep in short slices so a shutdown signal is honoured promptly.
-            deadline = time.monotonic() + sleep_for
-            while not _shutdown and time.monotonic() < deadline:
-                time.sleep(min(1.0, deadline - time.monotonic()))
+                for name in due:
+                    next_due[name] += intervals[name]
+                    if next_due[name] < time.monotonic():
+                        # We fell behind (slow API, disk stall). Resync rather
+                        # than firing a catch-up burst against a quota.
+                        log.warning("%s behind schedule, resyncing", name)
+                        next_due[name] = time.monotonic() + intervals[name]
+
+                if polls["vehicle_positions"] and polls["vehicle_positions"] % 120 == 0:
+                    log.info("heartbeat: %s", ", ".join(f"{n}={polls[n]}" for n in FEEDS))
+
+            # Wake up often enough to honour a shutdown signal promptly and to
+            # notice whichever feed comes due next.
+            time.sleep(min(1.0, max(0.05, min(next_due.values()) - time.monotonic())))
     finally:
         writer.close()
         session.close()
-        log.info("capture stopped after %s ticks", ticks)
+        log.info("capture stopped after %s", ", ".join(f"{n}={polls[n]} polls" for n in FEEDS))
 
     return 0
 
