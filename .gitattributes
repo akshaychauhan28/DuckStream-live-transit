@@ -1,0 +1,13 @@
+# This repo is authored on Windows and deployed to a Linux VM, so line endings
+# have to be pinned. A CRLF in a systemd unit or a shell script fails in ways
+# that are genuinely hard to read.
+#
+# Normalize everything to LF in the repository; Git may still check files out
+# as CRLF locally, which is fine.
+* text=auto eol=lf
+
+# Never touch these — they're either binary or must stay byte-exact.
+*.pb        binary
+*.gz        binary
+*.parquet   binary
+*.duckdb    binary

@@ -1,0 +1,40 @@
+# systemd unit for the always-on capture VM.
+#
+# Install:
+#   sudo cp capture/duckstream-capture.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now duckstream-capture
+#
+# Adjust User/paths if you're not on the default Ubuntu image.
+
+[Unit]
+Description=DuckStream raw GTFS-RT capture
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/duckstream
+
+# Key and settings live here, mode 600, outside the git repo.
+EnvironmentFile=/etc/duckstream/capture.env
+
+ExecStart=/home/ubuntu/duckstream/.venv/bin/python /home/ubuntu/duckstream/capture/capture.py
+
+# Always come back. This is the component that must not stay down.
+Restart=always
+RestartSec=10
+
+# SIGTERM lets the script close the current gzip file cleanly rather than
+# leaving a truncated frame. read_frames() tolerates truncation anyway, but
+# there's no reason to create the problem.
+KillSignal=SIGTERM
+TimeoutStopSec=60
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=duckstream-capture
+
+[Install]
+WantedBy=multi-user.target

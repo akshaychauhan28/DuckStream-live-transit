@@ -1,0 +1,27 @@
+# Verified to have wheels on Python 3.14 (probed 2026-08-21).
+# Versions intentionally unpinned during Phase 1; pin with `pip freeze` once
+# the pipeline is stable so the archive is reproducible.
+
+# --- Capture (this is all the VM needs — keep it minimal) ------------------
+requests
+
+# --- Ingestion / decode ----------------------------------------------------
+gtfs-realtime-bindings
+protobuf
+
+# --- Streaming -------------------------------------------------------------
+confluent-kafka
+
+# --- Processing & storage --------------------------------------------------
+polars
+pyarrow
+duckdb
+
+# --- API layer (Phase 4) ---------------------------------------------------
+fastapi
+uvicorn
+pydantic
+python-dotenv
+
+# --- Dev -------------------------------------------------------------------
+pytest

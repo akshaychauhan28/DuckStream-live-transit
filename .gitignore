@@ -1,0 +1,36 @@
+# --- Secrets: never commit -------------------------------------------------
+.env
+.env.local
+*.key
+*.pem
+
+# --- Data lake & raw archive (large, regenerable-from-source, never in git) --
+data/
+raw/
+*.parquet
+*.duckdb
+*.duckdb.wal
+
+# --- Fixtures ---------------------------------------------------------------
+# smoke_test.py saves response BODIES only (never headers), so fixtures contain
+# public transit data and no credentials. Committing a couple of small ones is
+# good — it makes tests deterministic and lets someone else run this repo.
+# Bulk capture files are a different matter: those stay out.
+tests/fixtures/*.gz
+
+# --- Python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# --- OS / editor ----------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/

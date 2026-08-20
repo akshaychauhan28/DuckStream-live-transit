@@ -1,0 +1,28 @@
+-- Ingestion gap detection: honest uptime reporting.
+--
+-- Not implemented — Phase 3. Why it matters:
+--
+-- "The pipeline ran continuously for 30 days" is a claim. This query is the
+-- evidence. If it turns out to be 28.5 days with a 6-hour hole on day 12 when
+-- the VM rebooted, the honest number is the one to report.
+--
+-- The capture archive stores three distinguishable states, and a good gap
+-- report separates them:
+--
+--   1. Frames present, status 200        -> collecting normally
+--   2. Frames present, status != 200     -> we polled, the API failed
+--   3. No frames for a time window       -> we were not running
+--
+-- (2) and (3) are different facts. (2) is OC Transpo's outage; (3) is yours.
+-- Conflating them either overstates your reliability or understates it.
+--
+-- Suggested shape:
+--   - generate a series of expected poll timestamps across the archive window
+--   - left join actual frames onto it
+--   - group consecutive misses into gap ranges with start, end, duration
+--   - report total expected polls, actual polls, and success rate per day
+--
+-- Worth also tracking: the delta between meta.fetched_at and the feed's own
+-- header timestamp. If that grows, the feed is going stale even while your
+-- polling looks perfectly healthy — a failure that a naive uptime check misses
+-- entirely.
