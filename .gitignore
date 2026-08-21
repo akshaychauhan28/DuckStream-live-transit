@@ -4,6 +4,10 @@
 *.key
 *.pem
 
+# Private working notes live outside this repo. This is a tripwire in case one
+# ever gets copied in by accident.
+*PRIVATE*
+
 # --- Data lake & raw archive (large, regenerable-from-source, never in git) --
 data/
 raw/
