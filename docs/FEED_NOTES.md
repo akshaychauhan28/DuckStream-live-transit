@@ -34,8 +34,7 @@ overwhelming majority, with a small stale tail. Both timestamps still need to be
 carried through the pipeline — event time and observation time are different
 facts — but the tail is the exception, not the norm.
 
-`schedule_relationship` on the trip: 498 × `0` (SCHEDULED), 5 × `8`. See the
-open question below about value 8.
+`schedule_relationship` on the trip: 498 × `0` (SCHEDULED), 5 × `8` (NEW).
 
 ## TripUpdates — 676 entities, 331 KB raw / 106 KB gzipped
 
@@ -60,8 +59,12 @@ Of the arrivals that exist, **100% carry `arrival.time` and 0% carry
 `stop_time_update.schedule_relationship`: 14,503 × `0` (SCHEDULED),
 142 × `1` (SKIPPED) — real skipped-stop signal.
 
-Trip-level `schedule_relationship`: 637 × `0`, **30 × `3` (CANCELED)**,
-9 × `8`.
+Trip-level `schedule_relationship`: 637 × `0` (SCHEDULED),
+**30 × `3` (CANCELED)**, **9 × `8` (NEW)**.
+
+`NEW` is defined in the spec as *"an extra trip unrelated to any existing trips,
+for example, to respond to sudden passenger load"* — OC Transpo dispatching
+extra buses against demand, visible in the feed.
 
 ## The consequence: delay must be derived
 
@@ -76,13 +79,32 @@ There is no path to a delay number that does not go through static GTFS. This
 moves static GTFS from "important context" to a hard prerequisite for the
 project's central analysis. See DECISIONS.md #10.
 
+### Not every trip can have a delay
+
+The formula needs a scheduled counterpart in static GTFS, and several
+`schedule_relationship` values mean no such counterpart exists:
+
+| Value | Meaning | Has a scheduled time? |
+|---|---|---|
+| `0` SCHEDULED | running against its GTFS schedule | yes |
+| `1` ADDED | deprecated in the spec | no |
+| `2` UNSCHEDULED | frequency-based, `exact_times=0` | no |
+| `3` CANCELED | was scheduled, removed | scheduled, but never arrives |
+| `6` DUPLICATED | copy of a trip at a different time | not directly |
+| `7` DELETED | removed, must not be shown to users | exclude entirely |
+| `8` NEW | extra trip added for demand | **no** |
+
+In the sample, 30 CANCELED + 9 NEW = **39 of 676 trips (5.8%)** cannot produce a
+normal delay figure. They are not bad data — they're real operational events —
+but a delay aggregation has to exclude them deliberately rather than let the
+join drop them silently.
+
+Enum definitions are in
+[gtfs-realtime.proto](https://github.com/google/transit/blob/master/gtfs-realtime/proto/gtfs-realtime.proto),
+which is the source of truth for both feeds.
+
 ## Open questions
 
-- **`schedule_relationship = 8`** appears in both feeds (5 vehicles, 9 trips).
-  The standard `TripDescriptor.ScheduleRelationship` enum runs 0,1,2,3,5,6,7.
-  8 is either a newer spec addition or an OC Transpo extension — worth asking
-  on the developer portal rather than guessing, since it may mark something
-  analytically meaningful.
 - **`start_time` is local service time**, not UTC. The sample shows
   `start_time: "16:56:00"` on a feed stamped 21:42 UTC — Ottawa is UTC-4 in
   August. GTFS also permits values past `24:00:00` for trips running after
