@@ -140,6 +140,17 @@ Prior expectation is that date+route loses (~120 routes × 30 days = 3,600+
 directories of small files, which is slow on both HDD and DuckDB), but the
 measurement is the artifact, so it should not be pre-empted here.
 
+**A second axis surfaced from the GTFS spec: which "date"?** A service day is
+not a calendar day. A trip with `start_time` `24:30:00` on Friday runs at 00:30
+Saturday but belongs to Friday's service. Partitioning on calendar date splits
+those trips away from the service day they belong to, so a query for "Friday
+evening service" silently misses its own tail.
+
+Options are calendar date (simple, matches observation time) or service date
+(matches how the agency reasons about service, but has to be derived). Late
+evening is exactly when delays are interesting, so this is not a corner case.
+Decide it alongside the partitioning bake-off.
+
 ---
 
 ## 8. Python 3.14 locally, 3.10 as the floor
