@@ -38,6 +38,17 @@ import requests
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from frames import write_frame  # noqa: E402
 
+# Load .env when running locally, if python-dotenv happens to be installed.
+# On the VM it deliberately isn't — systemd supplies the environment from
+# /etc/duckstream/capture.env instead. So this is a local convenience, not a
+# dependency, and the VM install stays at exactly one package: requests.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+except ImportError:
+    pass
+
 # --- Feeds -----------------------------------------------------------------
 # Confirmed against the OC Transpo developer portal (Azure API Management).
 # Auth is a subscription key in the Ocp-Apim-Subscription-Key header.
