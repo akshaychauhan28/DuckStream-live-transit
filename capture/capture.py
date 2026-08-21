@@ -49,6 +49,19 @@ FEEDS = {
 
 REQUEST_TIMEOUT_SECONDS = 20
 
+# Identify ourselves on every request.
+#
+# OC Transpo publishes no hard quota; instead they ask developers to cache and
+# avoid high-frequency polling, and reserve the right to throttle or suspend
+# keys that cause excessive load. A descriptive User-Agent means that if anyone
+# ever looks at their logs wondering who is pulling this volume, they find a
+# named project with a contact point rather than an anonymous scraper. Cheap
+# insurance against being switched off without warning.
+USER_AGENT = (
+    "DuckStream/0.1 "
+    "(+https://github.com/akshaychauhan28/DuckStream-live-transit)"
+)
+
 # Per-feed poll intervals, in seconds.
 #
 # Measured 2026-08-20 on real payloads: TripUpdates is ~105KB gzipped per poll
@@ -142,7 +155,10 @@ def fetch(session: requests.Session, name: str, url: str, key: str) -> tuple[dic
     try:
         response = session.get(
             url,
-            headers={"Ocp-Apim-Subscription-Key": key},
+            headers={
+                "Ocp-Apim-Subscription-Key": key,
+                "User-Agent": USER_AGENT,
+            },
             timeout=REQUEST_TIMEOUT_SECONDS,
         )
         meta["status"] = response.status_code

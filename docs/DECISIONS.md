@@ -8,28 +8,43 @@ block.
 
 ---
 
-## 1. Polling interval vs. API quota — **OPEN, blocks continuous capture**
+## 1. Polling interval vs. API limits — **RESOLVED 2026-08-21**
 
-**Decision:** default to 30-second polling, but treat it as unverified.
+**Finding:** OC Transpo publishes no hard numerical quota or rate limit for the
+public GTFS-Realtime feeds. Access is managed through the subscription key, with
+developers asked to cache and to avoid high-frequency polling. OC Transpo
+reserves the right to throttle or suspend keys causing excessive load.
 
-30s across both feeds is **5,760 calls/day**, ~173,000/month. OC Transpo serves
-GTFS-RT through Azure API Management, and APIM products almost always carry a
-quota — some free tiers are as low as a few thousand calls *per week*, which
-would make 30s polling impossible.
+**What that changes.** The catastrophic case is off the table: there is no cap
+to blow through and no silent mid-month cutoff. But it is replaced by
+*discretionary suspension*, which is in some ways worse — unpredictable in
+timing, and likely requiring human intervention to reverse. It could land on
+day 19.
 
-The quota is visible only behind the portal login, so it has to be read off the
-Products page or off the response headers (`smoke_test.py` prints any
-`RateLimit-*` / `Quota-*` headers the API returns — those are more trustworthy
-than documentation).
+So the constraint isn't "stay under N calls." It's "don't be the reason someone
+looks at the logs."
 
-**Cost if wrong:** hitting the cap mid-month silently kills collection, which is
-the one failure this project cannot absorb. Verify before starting continuous
-capture, and set `CAPTURE_INTERVAL_SECONDS` to fit the real quota.
+**Decisions taken:**
 
-**Note:** if the quota forces a slower interval, that is not a disaster —
-vehicle positions typically refresh every 20–60s anyway, so 60s polling loses
-less than it sounds like. Measure the real refresh rate from the fixtures before
-assuming 30s is even useful.
+1. **VehiclePositions at 30s.** Measured median staleness is 13s and p90 is 21s,
+   so 30s roughly tracks the feed's own refresh rate. Polling faster would
+   return duplicate data at real cost to their servers — wasteful and exactly
+   the profile that gets noticed.
+
+2. **TripUpdates slower.** This is the load driver, not the call count: 331 KB
+   per response against VehiclePositions' 38 KB. Both feeds at 30s pulls roughly
+   **1 GB/day / ~32 GB/month** from OC Transpo. Slowing TripUpdates to 120s cuts
+   that to ~350 MB/day, and its predicted arrival times don't change meaningfully
+   inside 30s anyway. This is the single most considerate change available, and
+   it happens to be the right engineering call regardless — see #9.
+
+3. **Identify ourselves.** Every request carries a descriptive `User-Agent`
+   naming the project and linking the repo. If anyone reviews their logs, they
+   find a named project with a contact point rather than an anonymous scraper.
+
+**Still worth testing:** whether the endpoints honour `ETag` / `If-Modified-Since`.
+A 304 on an unchanged feed would cut transferred bytes substantially at zero
+cost to data quality, and directly answers their request to cache.
 
 ---
 
