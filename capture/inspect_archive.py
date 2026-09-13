@@ -29,7 +29,9 @@ def main() -> int:
         print(f"No archive at {raw.resolve()} — has capture.py run yet?")
         return 1
 
-    files = sorted(raw.glob("capture_*.jsonl.gz"))
+    # *.gz covers both the current `.frames.gz` files and the `.jsonl.gz` files
+    # written by the first version of capture.py.
+    files = sorted(raw.glob("capture_*.gz"))
     if not files:
         print(f"{raw.resolve()} exists but holds no capture files yet.")
         return 1
@@ -39,9 +41,12 @@ def main() -> int:
     payload_bytes = Counter()
     times = []
     errors = []
+    unfinished = []
+    damaged = []
 
     for path in files:
-        for meta, body in read_frames(path):
+        stats = {}
+        for meta, body in read_frames(path, stats):
             feed = meta.get("feed", "?")
             per_feed[feed] += 1
             payload_bytes[feed] += len(body)
@@ -55,6 +60,11 @@ def main() -> int:
                     )
             if meta.get("fetched_at"):
                 times.append(meta["fetched_at"])
+
+        if stats.get("unreadable_bytes"):
+            damaged.append((path.name, stats["unreadable_bytes"]))
+        elif stats.get("incomplete_tail"):
+            unfinished.append(path.name)
 
     disk = sum(p.stat().st_size for p in files)
     total = sum(per_feed.values())
@@ -86,6 +96,16 @@ def main() -> int:
                     - datetime.fromisoformat(times[0])).total_seconds()
             if span > 0:
                 print(f"  {'':20s} effective interval ~{span/n:.0f}s")
+
+    if unfinished:
+        print("\n  still being written, or cut off mid-write (normal while capture runs):")
+        for name in unfinished:
+            print(f"    {name}")
+
+    if damaged:
+        print("\n  DAMAGED — everything after the damage point could not be read:")
+        for name, n in damaged:
+            print(f"    {name}: {n:,} bytes unreadable")
 
     if errors:
         print("\n  recent failures:")

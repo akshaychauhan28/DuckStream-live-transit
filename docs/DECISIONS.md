@@ -105,12 +105,45 @@ the VM dies (rsync often so the laptop holds a second copy).
 
 ## 4. Raw archive framing format
 
-**Decision:** length-prefixed frames (JSON metadata block + raw response bytes)
-inside hourly gzip files. See `capture/frames.py` for the full rationale.
+**Decision:** length-prefixed frames (JSON metadata block + raw response bytes),
+**each frame compressed as its own gzip member**, appended to one file per UTC
+hour, with **a new file for every run** (`capture_<hour>-r<run>.frames.gz`). See
+`capture/frames.py` for the full rationale.
 
-Short version: one-file-per-poll creates ~5,760 tiny files/day and makes rsync
-crawl; base64-in-JSONL is friendlier but defeats gzip on binary payloads and
-costs meaningful space over 30 days.
+Short version: one-file-per-poll creates thousands of tiny files a day and makes
+rsync crawl; base64-in-JSONL is friendlier but defeats gzip on binary payloads
+and costs meaningful space over 30 days.
+
+**Revised 2026-09-13 after a real failure.** The first writer held one gzip
+stream open per hour and only flushed after each poll. gzip writes its
+end-of-stream marker on close, so the file for the current hour was never a
+valid gzip file while it was being written. Reading it — the first time anyone
+tried, with `inspect_archive.py` against live capture — raised `EOFError`.
+
+The reader had claimed to tolerate truncated files, and had a test saying so.
+The test was wrong: it truncated the *decompressed* stream and re-compressed it,
+which always yields a valid file, so it never exercised a truncated gzip stream.
+
+The same design hid a worse failure: a run killed without closing its file,
+followed by a restart in the same hour, would append a new gzip stream after an
+unterminated one, making the rest of that hour unreadable.
+
+The fix is structural, not just a more forgiving reader:
+
+- **One gzip member per frame.** Every frame on disk is complete the moment its
+  write returns. The worst a hard kill leaves is one partial member at the end.
+- **Never append to an earlier run's file.** A restart mid-hour opens `-r1`,
+  `-r2`, and so on, so an unterminated tail is never followed by more data.
+- **The reader never raises on a damaged file.** It returns every complete frame
+  and reports whether the file was unfinished or damaged.
+- **Tests cut the compressed bytes on disk**, including reading a legacy file
+  while its writer still holds it open.
+
+Files from the first writer (`capture_<hour>.jsonl.gz`) remain readable.
+
+Cost: an 18-byte gzip header and trailer per frame, and no compression across
+polls — negligible, and the storage estimates were already measured on
+individually compressed payloads.
 
 Storing failed polls as frames (status, no body) is deliberate — it lets gap
 analysis distinguish "the API returned 503" from "we weren't running", which are

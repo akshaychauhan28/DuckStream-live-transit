@@ -36,6 +36,10 @@ def stub_env(monkeypatch, tmp_path):
     monkeypatch.setattr(cap.signal, "signal", lambda *a, **k: None)
     monkeypatch.setenv("OC_TRANSPO_PRIMARY_KEY", "test-key")
     monkeypatch.setenv("CAPTURE_OUTPUT_DIR", str(tmp_path))
+    # capture.py loads the developer's real .env on import. Clear any interval
+    # it set, so each test decides its own schedule.
+    for var in ("CAPTURE_INTERVAL_SECONDS", *cap.INTERVAL_ENV.values()):
+        monkeypatch.delenv(var, raising=False)
     cap._shutdown = False
     yield calls, tmp_path
     cap._shutdown = False
@@ -83,13 +87,52 @@ def test_frames_are_written_and_readable(stub_env, monkeypatch):
 
     _run_for(2.5)
 
-    files = list(Path(out).glob("capture_*.jsonl.gz"))
+    files = list(Path(out).glob("capture_*.frames.gz"))
     assert files, "no capture file written"
 
     frames = [f for p in files for f in read_frames(p)]
     assert len(frames) == sum(calls.values()), "every poll should be one frame"
     assert all(body == b"stub-body" for _, body in frames)
     assert {m["feed"] for m, _ in frames} == {"vehicle_positions", "trip_updates"}
+
+
+def test_restart_never_appends_to_an_earlier_runs_file(tmp_path):
+    """
+    If a run is killed mid-write, its file can end in a partial gzip member.
+    Appending after that would make the rest of the file unreadable, so a new
+    run must always start its own file.
+    """
+    first_run = cap.HourlyWriter(tmp_path)
+    first_run.write({"run": 1}, b"a")
+    first_run.write({"run": 1}, b"b")
+
+    second_run = cap.HourlyWriter(tmp_path)
+    second_run.write({"run": 2}, b"c")
+
+    files = sorted(tmp_path.glob("capture_*.frames.gz"))
+    assert len(files) == 2, [f.name for f in files]
+    assert [m["run"] for m, _ in read_frames(files[0])] == [1, 1]
+    assert [m["run"] for m, _ in read_frames(files[1])] == [2]
+
+
+def test_file_being_written_is_always_readable(stub_env, monkeypatch):
+    """Reading mid-run must never crash — this is what broke inspect_archive."""
+    calls, out = stub_env
+    monkeypatch.setenv("CAPTURE_INTERVAL_SECONDS", "1")
+
+    thread = threading.Thread(target=cap.main, daemon=True)
+    thread.start()
+    try:
+        time.sleep(2.5)
+        files = list(Path(out).glob("capture_*.frames.gz"))
+        assert files, "no capture file written"
+        stats = {}
+        frames = [f for p in files for f in read_frames(p, stats)]  # while running
+        assert frames
+        assert not stats.get("unreadable_bytes")
+    finally:
+        cap._shutdown = True
+        thread.join(timeout=10)
 
 
 def test_loop_survives_a_failing_fetch(stub_env, monkeypatch):
@@ -111,5 +154,5 @@ def test_loop_survives_a_failing_fetch(stub_env, monkeypatch):
     _run_for(3.5)
 
     assert state["n"] > 3, "loop stopped after the failures instead of continuing"
-    files = list(Path(out).glob("capture_*.jsonl.gz"))
+    files = list(Path(out).glob("capture_*.frames.gz"))
     assert files, "loop never recovered enough to write anything"

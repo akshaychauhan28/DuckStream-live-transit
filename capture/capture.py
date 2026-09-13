@@ -24,7 +24,6 @@ Run:
 Stops cleanly on SIGTERM/SIGINT so systemd restarts don't truncate a frame.
 """
 
-import gzip
 import logging
 import os
 import signal
@@ -36,7 +35,7 @@ from pathlib import Path
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from frames import write_frame  # noqa: E402
+from frames import append_frame  # noqa: E402
 
 # Load .env when running locally, if python-dotenv happens to be installed.
 # On the VM it deliberately isn't — systemd supplies the environment from
@@ -112,41 +111,40 @@ def _handle_signal(signum, _frame):
 
 class HourlyWriter:
     """
-    Holds one open gzip file per UTC hour and rolls over on the hour boundary.
+    Appends frames to one file per UTC hour, with a fresh file for each run.
 
-    Kept as a class purely so the rollover logic and the file handle live in one
-    place — if a rollover throws, we want it to be obvious where.
+    Two rules keep every file readable at every moment, including while it is
+    still being written or being copied by rsync:
+
+      1. Each frame is its own complete gzip member (see frames.py), so a file
+         never depends on a close() to become valid.
+      2. A run never appends to a file that an earlier run created. If that run
+         was killed mid-write, its file may end in a partial member, and
+         anything appended after it would be unreadable. So a restart mid-hour
+         starts `-r1`, then `-r2`, and so on.
     """
 
     def __init__(self, output_dir: Path):
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self._hour_key: str | None = None
-        self._fh = None
+        self._path: Path | None = None
 
-    def _path_for(self, hour_key: str) -> Path:
-        # Flat filenames sort chronologically and rsync cheaply.
-        return self.output_dir / f"capture_{hour_key}.jsonl.gz"
+    def _fresh_path(self, hour_key: str) -> Path:
+        run = 0
+        while True:
+            path = self.output_dir / f"capture_{hour_key}-r{run}.frames.gz"
+            if not path.exists():
+                return path
+            run += 1
 
-    def handle(self, now: datetime):
-        hour_key = now.strftime("%Y-%m-%dT%H")
+    def write(self, meta: dict, body: bytes) -> None:
+        hour_key = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H")
         if hour_key != self._hour_key:
-            self.close()
-            path = self._path_for(hour_key)
-            # Append mode: if the process restarts mid-hour we add to the
-            # existing file rather than truncating an hour of collection.
-            self._fh = gzip.open(path, "ab")
+            self._path = self._fresh_path(hour_key)
             self._hour_key = hour_key
-            log.info("writing to %s", path.name)
-        return self._fh
-
-    def close(self):
-        if self._fh is not None:
-            try:
-                self._fh.close()
-            except Exception:
-                log.exception("failed closing capture file")
-            self._fh = None
+            log.info("writing to %s", self._path.name)
+        append_frame(self._path, meta, body)
 
 
 def fetch(session: requests.Session, name: str, url: str, key: str) -> tuple[dict, bytes]:
@@ -224,15 +222,13 @@ def main() -> int:
 
             if due:
                 try:
-                    fh = writer.handle(datetime.now(timezone.utc))
                     for name in due:
                         meta, body = fetch(session, name, FEEDS[name], key)
-                        write_frame(fh, meta, body)
+                        writer.write(meta, body)
                         polls[name] += 1
                         if meta.get("status") != 200:
                             log.warning("%s: status=%s %s", name, meta.get("status"),
                                         meta.get("error") or meta.get("error_body", ""))
-                    fh.flush()
                 except Exception:
                     # The loop itself must survive anything — a full disk, a
                     # permissions change, a bad clock. Log and take the next tick.
@@ -246,14 +242,14 @@ def main() -> int:
                         log.warning("%s behind schedule, resyncing", name)
                         next_due[name] = time.monotonic() + intervals[name]
 
-                if polls["vehicle_positions"] and polls["vehicle_positions"] % 120 == 0:
+                vp_polls = polls["vehicle_positions"]
+                if "vehicle_positions" in due and vp_polls and vp_polls % 120 == 0:
                     log.info("heartbeat: %s", ", ".join(f"{n}={polls[n]}" for n in FEEDS))
 
             # Wake up often enough to honour a shutdown signal promptly and to
             # notice whichever feed comes due next.
             time.sleep(min(1.0, max(0.05, min(next_due.values()) - time.monotonic())))
     finally:
-        writer.close()
         session.close()
         log.info("capture stopped after %s", ", ".join(f"{n}={polls[n]} polls" for n in FEEDS))
 

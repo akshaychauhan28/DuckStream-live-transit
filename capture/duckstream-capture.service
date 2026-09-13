@@ -26,9 +26,10 @@ ExecStart=/home/ubuntu/duckstream/.venv/bin/python /home/ubuntu/duckstream/captu
 Restart=always
 RestartSec=10
 
-# SIGTERM lets the script close the current gzip file cleanly rather than
-# leaving a truncated frame. read_frames() tolerates truncation anyway, but
-# there's no reason to create the problem.
+# SIGTERM lets the script finish its current request and write before exiting.
+# Frames are complete gzip members and each run starts its own file, so even a
+# hard kill costs at most the one frame being written — but there's no reason
+# to create that problem.
 KillSignal=SIGTERM
 TimeoutStopSec=60
 

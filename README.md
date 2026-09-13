@@ -26,7 +26,8 @@ capture.py                      rsync raw files down
   |  every 30s                    |
   |  fetch, gzip, append          v
   v                             replay.py --> Redpanda --> Polars --> Parquet
-raw/capture_<hour>.jsonl.gz       (decode)     (topic)   (transform)  (lake)
+raw/capture_<hour>-r<run>         (decode)     (topic)   (transform)  (lake)
+  .frames.gz
   ^                                                                     |
   |                                                                     v
   immutable. never edited.                                       DuckDB + FastAPI

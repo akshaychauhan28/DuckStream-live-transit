@@ -5,7 +5,10 @@ This replaces the spec's separate poller.py + producer.py. Under the Option A
 design the *fetching* happens on the VM (capture/capture.py), so what's left
 here is decode-and-publish, which is one job.
 
-    raw/capture_2026-08-21T14.jsonl.gz  ->  topic: vehicle-positions
+    raw/capture_2026-09-13T19-r0.frames.gz  ->  topic: vehicle-positions
+
+(Files named capture_<hour>.jsonl.gz are from the first version of capture.py.
+Same frames, one long gzip stream per file; read_frames handles both.)
 
 Because it reads from files rather than the live API, it is fully re-runnable.
 That is the point: when the transform logic changes on day 19, you replay 19
