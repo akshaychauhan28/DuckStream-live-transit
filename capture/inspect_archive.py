@@ -11,11 +11,11 @@ Safe to run while capture.py is still writing — read_frames tolerates a
 partially written final frame.
 """
 
-import gzip
 import os
+import statistics
 import sys
-from collections import Counter
-from datetime import datetime, timezone
+from collections import Counter, defaultdict
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -40,6 +40,7 @@ def main() -> int:
     failures = Counter()
     payload_bytes = Counter()
     times = []
+    feed_times = defaultdict(list)
     errors = []
     unfinished = []
     damaged = []
@@ -60,6 +61,7 @@ def main() -> int:
                     )
             if meta.get("fetched_at"):
                 times.append(meta["fetched_at"])
+                feed_times[feed].append(datetime.fromisoformat(meta["fetched_at"]))
 
         if stats.get("unreadable_bytes"):
             damaged.append((path.name, stats["unreadable_bytes"]))
@@ -91,11 +93,14 @@ def main() -> int:
         if bad:
             line += f"   {bad} FAILED ({100*bad/n:.1f}%)"
         print(line)
-        if times and n > 1:
-            span = (datetime.fromisoformat(times[-1])
-                    - datetime.fromisoformat(times[0])).total_seconds()
-            if span > 0:
-                print(f"  {'':20s} effective interval ~{span/n:.0f}s")
+        stamps = sorted(feed_times[feed])
+        if len(stamps) > 1:
+            # Median of the gaps between consecutive polls, rather than span /
+            # count: a restart fires every feed immediately, which drags a
+            # simple average below the configured interval.
+            gaps = [(b - a).total_seconds() for a, b in zip(stamps, stamps[1:])]
+            print(f"  {'':20s} interval ~{statistics.median(gaps):.0f}s, "
+                  f"longest gap {max(gaps):.0f}s")
 
     if unfinished:
         print("\n  still being written, or cut off mid-write (normal while capture runs):")
