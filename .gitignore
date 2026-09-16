@@ -11,6 +11,7 @@
 # --- Data lake & raw archive (large, regenerable-from-source, never in git) --
 data/
 raw/
+logs/
 *.parquet
 *.duckdb
 *.duckdb.wal
