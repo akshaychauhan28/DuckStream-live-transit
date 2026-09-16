@@ -26,10 +26,26 @@ looks at the logs."
 
 **Decisions taken:**
 
-1. **VehiclePositions at 30s.** Measured median staleness is 13s and p90 is 21s,
-   so 30s roughly tracks the feed's own refresh rate. Polling faster would
-   return duplicate data at real cost to their servers — wasteful and exactly
-   the profile that gets noticed.
+1. **VehiclePositions at 45s** — revised 2026-09-17, see below.
+
+   *The original reasoning was wrong.* It set 30s because measured staleness
+   was 13s at the median. Staleness is how old a reading is when we fetch it;
+   it says nothing about how often a new reading appears, and only the second
+   number should set a polling rate.
+
+   Measuring the right thing across 725,633 decoded records: a vehicle updates
+   its own timestamp every **60s at the median**, 80s at p90, and only 5.5% of
+   updates arrive within 30s. Polling every 30s was returning the identical
+   reading **57.5% of the time**.
+
+   45s sits below the median report interval, so essentially no updates are
+   missed, and it cuts a third of the storage and of the load on OC Transpo.
+   60s was rejected: it sits exactly at the median, so normal jitter would
+   start costing real updates.
+
+   This leaves a seam in the archive — 30s before 2026-09-17, 45s after.
+   Harmless once deduped, but worth knowing before comparing raw row counts
+   across that date.
 
 2. **TripUpdates slower.** This is the load driver, not the call count: 331 KB
    per response against VehiclePositions' 38 KB. Both feeds at 30s pulls roughly

@@ -111,8 +111,12 @@ def test_restart_never_appends_to_an_earlier_runs_file(tmp_path):
 
     files = sorted(tmp_path.glob("capture_*.frames.gz"))
     assert len(files) == 2, [f.name for f in files]
-    assert [m["run"] for m, _ in read_frames(files[0])] == [1, 1]
-    assert [m["run"] for m, _ in read_frames(files[1])] == [2]
+
+    # Two runs starting in the same second share the HHMMSS part of their run
+    # id and differ only by its random suffix, so filename order is not
+    # creation order. Compare what each file holds, not which came first.
+    runs = sorted([m["run"] for m, _ in read_frames(path)] for path in files)
+    assert runs == [[1, 1], [2]], runs
 
 
 def test_file_being_written_is_always_readable(stub_env, monkeypatch):

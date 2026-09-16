@@ -75,19 +75,23 @@ USER_AGENT = (
 
 # Per-feed poll intervals, in seconds.
 #
-# Measured 2026-08-20 on real payloads: TripUpdates is ~105KB gzipped per poll
-# against VehiclePositions' ~12.5KB, so TripUpdates is ~89% of the archive by
-# size. Its signal (predicted arrival times) does not change meaningfully in
-# 30s, whereas VehiclePositions at 30s is what gives trajectory resolution for
-# speed derivation. So TripUpdates is the natural place to trade resolution for
-# disk if you need to.
+# 45s comes from measuring how often buses actually report, not from guessing.
+# Across 725,633 decoded records (2026-09-13 to 09-16), a vehicle updated its
+# own timestamp every 60s at the median, 80s at p90, and only 5.5% of updates
+# arrived within 30s. Polling every 30s therefore returned the same reading
+# twice 57.5% of the time.
 #
-#   both at 30s            -> ~341 MB/day  -> ~10.2 GB over 30 days
-#   VP 30s + TU 120s       -> ~112 MB/day  ->  ~3.4 GB over 30 days
+# 45s sits below the median report interval, so essentially nothing is missed,
+# while cutting a third of the storage and of the load on OC Transpo — who ask
+# developers to avoid high-frequency polling.
+#
+# TripUpdates is the other lever: ~354KB per response against VehiclePositions'
+# ~43KB, so it dominates bandwidth. Its predicted arrival times don't change
+# meaningfully inside a couple of minutes, hence 120s.
 #
 # CAPTURE_INTERVAL_SECONDS sets the default for every feed; the per-feed
 # variables override it.
-DEFAULT_INTERVAL = 30
+DEFAULT_INTERVAL = 45
 INTERVAL_ENV = {
     "vehicle_positions": "CAPTURE_INTERVAL_VEHICLE_POSITIONS_SECONDS",
     "trip_updates": "CAPTURE_INTERVAL_TRIP_UPDATES_SECONDS",

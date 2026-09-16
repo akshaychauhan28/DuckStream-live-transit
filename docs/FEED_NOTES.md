@@ -103,12 +103,45 @@ Enum definitions are in
 [gtfs-realtime.proto](https://github.com/google/transit/blob/master/gtfs-realtime/proto/gtfs-realtime.proto),
 which is the source of truth for both feeds.
 
+## Redundancy — measured 2026-09-17 over 3 days of archive
+
+725,633 decoded VehiclePositions records from 1,504 polls (2026-09-13 to 09-16,
+polling every 30s):
+
+| | |
+|---|---|
+| Unique readings | 308,528 |
+| Duplicates | 417,105 (**57.5%**) |
+| Distinct vehicles | 743 |
+
+**How often a vehicle actually reports** (seconds between its own timestamp
+updates, gaps over an hour excluded as out-of-service):
+
+| min | p25 | median | p75 | p90 | max |
+|---|---|---|---|---|---|
+| 3 | 57 | 60 | 65 | 80 | 3,592 |
+
+Only **5.5%** of updates arrive within 30s. So polling every 30s returned the
+same reading roughly three times in seven — which is what moved the interval to
+45s (DECISIONS.md #1).
+
+Note that report interval and staleness are different measurements and are easy
+to confuse: staleness (median 13s) is how old a reading is when fetched, while
+report interval (median 60s) is how often a new one exists. Only the second
+should set a polling rate.
+
+**`(vehicle_id, vehicle_timestamp)` is safe as a dedupe key.** Across all
+417,105 duplicates, every repeated key carried an identical position — zero
+conflicts. A repeated timestamp never hid real movement.
+
+Reproduce with `python scripts/measure_duplicates.py`.
+
 ## Open questions
 
 - **`start_time` is local service time**, not UTC. The sample shows
   `start_time: "16:56:00"` on a feed stamped 21:42 UTC — Ottawa is UTC-4 in
   August. GTFS also permits values past `24:00:00` for trips running after
   midnight. Both matter for the schema and for any date-based partitioning.
-- **Dedupe rate is not yet measurable.** It needs two consecutive polls to
-  compute, and we only captured one snapshot. Measure it on the first hour of
-  real capture — it directly sizes the Parquet layer.
+- **Is TripUpdates similarly redundant?** The same measurement has only been run
+  on VehiclePositions. TripUpdates is ~89% of the bandwidth, so if its
+  predictions also repeat between polls, 120s may still be faster than needed.
