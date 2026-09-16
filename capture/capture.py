@@ -26,6 +26,7 @@ Stops cleanly on SIGTERM/SIGINT so systemd restarts don't truncate a frame.
 
 import logging
 import os
+import secrets
 import signal
 import sys
 import time
@@ -120,8 +121,15 @@ class HourlyWriter:
          never depends on a close() to become valid.
       2. A run never appends to a file that an earlier run created. If that run
          was killed mid-write, its file may end in a partial member, and
-         anything appended after it would be unreadable. So a restart mid-hour
-         starts `-r1`, then `-r2`, and so on.
+         anything appended after it would be unreadable. So every run tags its
+         files with its own id.
+
+    The run id is the run's start time plus a few random characters, rather
+    than a counter like -r0/-r1. A counter has to look at the directory to know
+    what already exists, which is fine on a machine that keeps its disk — but
+    a Hugging Face Space is wiped on every restart, so a restarted run would
+    find an empty directory, pick -r0 again, and overwrite data it had already
+    uploaded. A run id cannot collide across a wipe.
     """
 
     def __init__(self, output_dir: Path):
@@ -129,19 +137,18 @@ class HourlyWriter:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self._hour_key: str | None = None
         self._path: Path | None = None
+        self._run_id = "{}-{}".format(
+            datetime.now(timezone.utc).strftime("%H%M%S"),
+            secrets.token_hex(2),
+        )
 
-    def _fresh_path(self, hour_key: str) -> Path:
-        run = 0
-        while True:
-            path = self.output_dir / f"capture_{hour_key}-r{run}.frames.gz"
-            if not path.exists():
-                return path
-            run += 1
+    def _path_for(self, hour_key: str) -> Path:
+        return self.output_dir / f"capture_{hour_key}-{self._run_id}.frames.gz"
 
     def write(self, meta: dict, body: bytes) -> None:
         hour_key = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H")
         if hour_key != self._hour_key:
-            self._path = self._fresh_path(hour_key)
+            self._path = self._path_for(hour_key)
             self._hour_key = hour_key
             log.info("writing to %s", self._path.name)
         append_frame(self._path, meta, body)

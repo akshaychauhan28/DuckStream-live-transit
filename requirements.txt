@@ -2,8 +2,11 @@
 # Versions intentionally unpinned during Phase 1; pin with `pip freeze` once
 # the pipeline is stable so the archive is reproducible.
 
-# --- Capture (this is all the VM needs — keep it minimal) ------------------
+# --- Capture (this is all the Space needs — keep it minimal) ---------------
 requests
+
+# --- Running capture in a Hugging Face Space, and pulling the archive back --
+huggingface_hub
 
 # --- Ingestion / decode ----------------------------------------------------
 gtfs-realtime-bindings

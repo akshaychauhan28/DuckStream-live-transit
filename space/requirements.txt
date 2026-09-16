@@ -1,0 +1,4 @@
+# The Space needs only what capture and the uploader use. Keeping this list
+# short is deliberate: this is the component that must not fail.
+requests
+huggingface_hub

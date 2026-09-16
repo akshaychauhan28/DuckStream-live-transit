@@ -48,6 +48,46 @@ cost to data quality, and directly answers their request to cache.
 
 ---
 
+## 11. Capture runs in a Hugging Face Space, not a cloud VM — **2026-09-17**
+
+**Supersedes the VM half of #2 and #3.** The reasoning in those entries stands;
+only the host changed.
+
+Oracle (like AWS, Google and Azure) requires a credit card to open an account.
+Without one, the realistic options were: keep the laptop awake, or a free host
+that needs no card. Three days of laptop capture settled it — a single sleep
+cost **24.9 hours** of collection, including a full weekday rush hour, which is
+exactly the hole #2 exists to prevent.
+
+**Rejected: Render.** Free web services sleep after 15 minutes without HTTP
+traffic, and a background poller generates none. Keeping it awake needs an
+external pinger every 15 minutes all month, and each sleep wipes the disk.
+
+**Chosen: a Hugging Face Space (free CPU basic).** It sleeps only after 48 hours
+without a visitor, which one scheduled ping a day prevents. Persisting data out
+of a Space into a Dataset repo is a use Hugging Face built a feature for
+(`CommitScheduler`), so this is a supported pattern rather than a workaround.
+
+**What it costs, honestly:**
+
+- More moving parts than one VM: the Space, the Dataset repo, and a keep-alive.
+  That is a real step away from the "fewest moving parts" principle in #3.
+- **The disk is wiped on every restart**, so the upload interval (5 minutes) is
+  the data-loss window. A VM would lose nothing.
+- Spaces are aimed at ML demos. Nothing in HF's content policy forbids this, but
+  nothing explicitly blesses it either.
+
+**One code change it forced.** Run files were named `-r0`, `-r1`, picked by
+checking which names already existed on disk. A wiped disk makes a restarted run
+pick `-r0` again and overwrite data it had already uploaded. Files are now tagged
+with a run id (start time plus random characters) that cannot collide across a
+wipe. Hugging Face's own docs warn about exactly this.
+
+The laptop now downloads the archive from the Dataset repo instead of rsyncing
+from a VM. Everything downstream is unchanged.
+
+---
+
 ## 2. Ingestion runs on an always-on VM, not the laptop
 
 **Decision:** capture runs on a small always-free cloud VM.
