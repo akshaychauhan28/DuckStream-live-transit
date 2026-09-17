@@ -77,6 +77,158 @@ from datetime import datetime
 from google.transit import gtfs_realtime_pb2
 
 
+def decode_trip_updates(meta: dict, body: bytes) -> tuple[list[dict], list[dict]]:
+    """
+    Split one TripUpdates frame into trips and predictions.
+
+    Not implemented — Phase 1.
+
+    A TripUpdates response is a tree, not a table: each trip carries one
+    prediction per stop it hasn't reached yet, ~21 of them at the median. One
+    response is ~676 trips and ~12,000 predictions.
+
+    Flattening to predictions alone would silently lose every cancelled trip,
+    because a cancelled trip has nothing to predict — 4.4% of trips in a real
+    sample. So this returns two lists, each with one meaning:
+
+        return (trips, predictions)
+
+    TRIP ROW — one per trip in this response
+
+        trip_id                str
+        start_date             str | None   YYYYMMDD
+        start_time             str | None   local service time, may exceed 24:00:00
+        route_id               str | None
+        schedule_relationship  int          0 SCHEDULED, 3 CANCELED, 8 NEW
+        vehicle_id             str | None   present on ~92% of trips
+        trip_update_timestamp  int | None   when OC Transpo generated this prediction
+        prediction_count       int          how many predictions below; 0 when cancelled
+        fetched_at             int          epoch seconds, from meta["fetched_at"]
+        feed_timestamp         int          epoch seconds, feed.header.timestamp
+
+    PREDICTION ROW — one per stop_time_update
+
+        trip_id                str
+        start_date             str | None   carried so (trip_id, start_date) joins
+                                            to a trip without a second lookup
+        stop_sequence          int
+        stop_id                str | None
+        arrival_time           int | None   epoch seconds
+        departure_time         int | None   epoch seconds; only ~2% carry one
+        schedule_relationship  int          0 SCHEDULED, 1 SKIPPED
+        fetched_at             int
+        feed_timestamp         int
+
+    RULES
+
+      1. A failed poll decodes to nothing: return ([], []).
+
+      2. trip_id alone is not unique — the same trip runs every day. The key is
+         (trip_id, start_date), which is why predictions carry start_date too.
+
+      3. Empty protobuf strings become None, as in decode_vehicle_positions.
+
+      4. arrival and departure are optional, and so is the `time` inside them.
+         Use HasField for both levels.
+
+      5. Cancelled trips still produce a trip row, with prediction_count 0 and
+         no prediction rows. That is the entire reason for the two-list shape.
+
+      6. schedule_relationship stays an integer at both levels. It defaults to
+         0 (SCHEDULED) when absent, which is correct.
+
+    NOTES
+
+        for entity in feed.entity:
+            if not entity.HasField("trip_update"):
+                continue
+            tu = entity.trip_update          # trip, vehicle, timestamp
+            t = tu.trip                      # trip_id, route_id, start_*
+            for stu in tu.stop_time_update:  # stop_sequence, stop_id, arrival
+                ...
+
+        tu.vehicle.id is "" when no vehicle is attached.
+        stu.arrival.time is epoch seconds, already absolute.
+
+    Run the tests to check your work:
+
+        .venv\\Scripts\\python.exe -m pytest tests/test_decode_trip_updates.py -v
+    """
+    if meta.get("status") != 200 or not body:
+        return [], []
+
+    feed = gtfs_realtime_pb2.FeedMessage()
+    feed.ParseFromString(body)
+
+    # Identical for every row in this response, so computed once: one is when
+    # we asked, the other is when OC Transpo built the response.
+    fetched_at = int(datetime.fromisoformat(meta["fetched_at"]).timestamp())
+    feed_timestamp = feed.header.timestamp
+
+    trips: list[dict] = []
+    predictions: list[dict] = []
+
+    for entity in feed.entity:
+        # A feed can carry other entity types; skip anything that isn't a trip.
+        if not entity.HasField("trip_update"):
+            continue
+
+        tu = entity.trip_update   # trip, vehicle, timestamp, stop_time_update
+        t = tu.trip               # trip_id, route_id, start_date, start_time
+
+        # trip_id alone repeats daily, so start_date is carried into the
+        # prediction rows too — (trip_id, start_date) is what joins them back.
+        start_date = t.start_date or None
+
+        stops = []
+        for stu in tu.stop_time_update:
+            # Optional at two levels: the arrival block may be absent, and the
+            # time inside it may be absent even when the block exists.
+            arrival_time = (
+                stu.arrival.time
+                if stu.HasField("arrival") and stu.arrival.HasField("time")
+                else None
+            )
+            departure_time = (
+                stu.departure.time
+                if stu.HasField("departure") and stu.departure.HasField("time")
+                else None
+            )
+
+            stops.append({
+                "trip_id": t.trip_id,
+                "start_date": start_date,
+                "stop_sequence": stu.stop_sequence,
+                "stop_id": stu.stop_id or None,
+                "arrival_time": arrival_time,
+                "departure_time": departure_time,
+                # 0 SCHEDULED, 1 SKIPPED. Defaults to 0 when absent, which is
+                # correct, so no `or None` here — 0 is a real value.
+                "schedule_relationship": stu.schedule_relationship,
+                "fetched_at": fetched_at,
+                "feed_timestamp": feed_timestamp,
+            })
+
+        # Built from the local list, so a cancelled trip — which carries no
+        # predictions at all — still produces a trip row, with a count of 0.
+        # That is the entire reason this function returns two lists.
+        trips.append({
+            "trip_id": t.trip_id,
+            "start_date": start_date,
+            "start_time": t.start_time or None,
+            "route_id": t.route_id or None,
+            "schedule_relationship": t.schedule_relationship,
+            "vehicle_id": tu.vehicle.id or None,
+            "trip_update_timestamp": tu.timestamp if tu.HasField("timestamp") else None,
+            "prediction_count": len(stops),
+            "fetched_at": fetched_at,
+            "feed_timestamp": feed_timestamp,
+        })
+        predictions.extend(stops)
+
+    return trips, predictions
+
+
 def decode_vehicle_positions(meta: dict, body: bytes) -> list[dict]:
     """Turn one VehiclePositions frame into a list of records. See module docstring."""
     # Failed polls are stored on purpose — they prove we were running when the
