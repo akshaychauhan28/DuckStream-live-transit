@@ -15,6 +15,10 @@ protobuf
 # --- Streaming -------------------------------------------------------------
 confluent-kafka
 
+# Timezone database. Windows ships none of its own, so zoneinfo has nothing to
+# read and converting Ottawa local schedule times to UTC fails outright.
+tzdata
+
 # --- Processing & storage --------------------------------------------------
 polars
 pyarrow
