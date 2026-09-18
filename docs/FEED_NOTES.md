@@ -136,6 +136,42 @@ conflicts. A repeated timestamp never hid real movement.
 
 Reproduce with `python scripts/measure_duplicates.py`.
 
+## Most predictions are the timetable echoed back — measured 2026-09-17
+
+Joining 131,713 captured predictions to the timetable in force gives a median
+delay of **0 seconds** and puts 50.2% of buses within a minute of schedule.
+That result is wrong, and it looks entirely reasonable.
+
+Grouping predictions by how far ahead the stop is shows why:
+
+| How far ahead | Rows | Exactly on time | Median delay |
+|---|---|---|---|
+| already at the stop | 4,040 | 2.9% | −31s |
+| next 5 min | 14,887 | **4.0%** | +119s |
+| 5 to 15 min | 28,527 | 15.2% | +85s |
+| 15 to 30 min | 40,221 | 36.0% | +9s |
+| 30 to 60 min | 35,058 | **56.6%** | 0s |
+| over 60 min | 5,175 | 11.1% | −22s |
+
+For a stop an hour away, **56.6% of predictions match the scheduled time to the
+second.** Real buses are never exactly on time, so those rows are not
+predictions at all — OC Transpo has nothing better to say yet and returns the
+timetable unchanged. About **31% of all rows** are that.
+
+Restricting to stops a bus is about to reach:
+
+| | All predictions | Within 5 min of the stop |
+|---|---|---|
+| Median delay | 0s | **90s** |
+| Within 60s | 50.2% | **26.9%** |
+| Over 5 min late | 16.3% | 23.7% |
+
+**Any punctuality figure must state which rows it used.** Counting every
+prediction measures how closely OC Transpo's predictions track its own
+timetable, which is not the same question as how late the buses are.
+
+Reproduce with `python query/delay_check.py --polls 10`.
+
 ## Open questions
 
 - **`start_time` is local service time**, not UTC. The sample shows
