@@ -9,12 +9,18 @@
 *PRIVATE*
 
 # --- Data lake & raw archive (large, regenerable-from-source, never in git) --
-data/
+data/*
 raw/
 logs/
 *.parquet
 *.duckdb
 *.duckdb.wal
+
+# One exception, and it has to come after the patterns above or they win:
+# the demo database ships with the deployment, so it lives in the repo.
+# ~23 MB, rebuilt by api/build_demo_db.py. Everything else under data/ stays
+# out, including the 200 MB Parquet lake and the GTFS bundles.
+!data/demo.duckdb
 
 # --- Fixtures ---------------------------------------------------------------
 # smoke_test.py saves response BODIES only (never headers), so fixtures contain
