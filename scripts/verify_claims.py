@@ -88,12 +88,19 @@ print("\nARRIVALS PER DAY (demo.duckdb)")
 demo = ROOT / "data" / "demo.duckdb"
 if demo.exists():
     d = duckdb.connect(str(demo), read_only=True)
-    counts = dict(d.execute(
-        "SELECT service_date, count(*) FROM arrivals GROUP BY 1").fetchall())
+    # service_date is a DATE, so format it rather than comparing to a string.
+    # This block silently printed zeros for a while after that column changed
+    # type, which is the exact failure this script exists to catch.
+    counts = d.execute("""
+        SELECT strftime(service_date, '%Y-%m-%d'), count(*)
+        FROM arrivals GROUP BY 1 ORDER BY 1
+    """).fetchall()
+    total = sum(n for _, n in counts)
     d.close()
-    for day, claimed in (("20260917", "150,332"), ("20260918", "36,462"),
-                         ("20260923", "0")):
-        show(day, f"{counts.get(day, 0):,}", claimed)
+    for day, n in counts:
+        show(day, f"{n:,}")
+    show("days with arrivals", f"{len(counts)}")
+    show("total arrivals", f"{total:,}", "585,201")
 
 print("\nTRIP ID MATCH RATE")
 preds = str(pq / "predictions" / "dt=*" / "part.parquet").replace("\\", "/")
