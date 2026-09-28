@@ -1,38 +1,112 @@
 """
-Natural language -> DuckDB SQL via Groq.
+Turn a plain-English question into DuckDB SQL.
 
-------------------------------------------------------------------------------
-Not implemented — Phase 4.
-------------------------------------------------------------------------------
+The model name is never written here. It comes from GROQ_MODEL, because model
+lineups move faster than this project does and a name hardcoded today would be
+stale within weeks. See docs/DECISIONS.md #5.
 
-Hard rule: the model name comes from os.environ["GROQ_MODEL"] and appears
-nowhere else — not in a default argument, not in a docstring, not in the README.
-See docs/DECISIONS.md #5. Pick the current fast/cheap Groq model at build time.
+The prompt carries the schema and the caveats stored in the database's `about`
+table, so the model repeats the project's own qualifications rather than
+inventing its own. What it cannot be trusted to do is decide what a fair
+punctuality measure is, which is why the table it queries already has delay
+computed rather than exposing the raw predictions.
 
-Design questions:
-
-  1. Schema in the prompt. The model needs to know your columns. Do you paste
-     the full schema every call (costs tokens, always accurate) or a curated
-     summary (cheaper, can drift)? What happens when the schema changes?
-
-  2. Groq free tier is limited per minute and per day. A public demo link can
-     exhaust it in an afternoon. Cache aggressively — many visitors will ask
-     near-identical questions, and a cache hit is both free and instant.
-
-  3. Generated SQL goes to guardrails.validate() before it goes anywhere near a
-     connection. No exceptions, no "just for testing" bypass.
-
-  4. Failure modes worth handling: the model returns prose instead of SQL,
-     returns SQL in a markdown fence, invents a column, or writes valid SQL
-     that answers a different question than the one asked. The last is the
-     hardest and the most interesting to write about.
-
-  5. Prove the model abstraction: run the same prompt set against two different
-     Groq models. If swapping is a one-line change, you've demonstrated it
-     rather than claimed it.
+Nothing here is trusted. Whatever comes back goes through guardrails.validate
+before it reaches a connection.
 """
 
+import os
+import re
 
-def generate_sql(question: str, schema: str) -> str:
-    """Return candidate SQL for `question`. Must be validated before execution."""
-    raise NotImplementedError("Phase 4 — see module docstring.")
+import requests
+
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+TIMEOUT = 30
+
+SYSTEM = """You write DuckDB SQL for a database of real Ottawa bus arrivals.
+
+{schema}
+
+What the data means:
+{about}
+
+Rules:
+- Answer with one SELECT statement and nothing else. No prose, no markdown.
+- Query only the `arrivals` table.
+- delay_seconds is already computed. Positive is late. Never try to recompute
+  it from scheduled_at and arrived_at.
+- Prefer median(delay_seconds) over avg, because a few very late buses drag an
+  average badly.
+- Use route_name and stop_name in results, not the id columns, so answers are
+  readable.
+- Add a sensible LIMIT when returning rows rather than an aggregate.
+- If a question cannot be answered from this table, return:
+  SELECT 'cannot answer that from this data' AS answer
+"""
+
+FENCE = re.compile(r"^\s*```(?:sql)?\s*|\s*```\s*$", re.IGNORECASE)
+
+
+class ModelError(Exception):
+    """The model could not be reached, or returned nothing usable."""
+
+
+def describe(con) -> tuple[str, str]:
+    """Build the schema and caveat text from the database itself."""
+    columns = con.execute("DESCRIBE arrivals").fetchall()
+    schema = "Table arrivals, one row per bus arrival at a stop:\n" + "\n".join(
+        f"  {name} {kind}" for name, kind, *_ in columns
+    )
+    notes = con.execute("SELECT topic, detail FROM about").fetchall()
+    about = "\n".join(f"  {topic}: {detail}" for topic, detail in notes)
+    return schema, about
+
+
+def clean(text: str) -> str:
+    """Strip the markdown fence models add even when told not to."""
+    text = FENCE.sub("", text.strip())
+    return text.strip().rstrip(";").strip()
+
+
+def generate_sql(question: str, schema: str, about: str = "") -> str:
+    """Ask the model for SQL. The result is unvalidated and untrusted."""
+    key = os.environ.get("GROQ_API_KEY", "").strip()
+    model = os.environ.get("GROQ_MODEL", "").strip()
+    if not key:
+        raise ModelError("GROQ_API_KEY is not set.")
+    if not model:
+        raise ModelError("GROQ_MODEL is not set.")
+
+    try:
+        response = requests.post(
+            GROQ_URL,
+            headers={"Authorization": f"Bearer {key}"},
+            json={
+                "model": model,
+                "temperature": 0,
+                "max_tokens": 500,
+                "messages": [
+                    {"role": "system",
+                     "content": SYSTEM.format(schema=schema, about=about)},
+                    {"role": "user", "content": question},
+                ],
+            },
+            timeout=TIMEOUT,
+        )
+    except requests.RequestException as exc:
+        raise ModelError(f"Could not reach the model: {type(exc).__name__}") from None
+
+    if response.status_code == 429:
+        raise ModelError("The model is rate limited right now. Try again shortly.")
+    if response.status_code != 200:
+        raise ModelError(f"The model returned HTTP {response.status_code}.")
+
+    try:
+        text = response.json()["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, ValueError):
+        raise ModelError("The model returned an unexpected response.") from None
+
+    sql = clean(text)
+    if not sql:
+        raise ModelError("The model returned an empty query.")
+    return sql
