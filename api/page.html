@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DuckStream &mdash; can you trust your bus?</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+ :root { color-scheme: light dark; --line: #8883; --dim: #777; }
+ * { box-sizing: border-box; }
+ body { font: 16px/1.5 system-ui, -apple-system, sans-serif; max-width: 60rem;
+        margin: 0 auto; padding: 2rem 1rem 4rem; }
+ h1 { font-size: 1.5rem; margin: 0 0 .25rem; }
+ h2 { font-size: 1.05rem; margin: 2.5rem 0 .5rem; }
+ p.sub { color: var(--dim); margin-top: 0; }
+ form { display: flex; gap: .5rem; margin: 1.25rem 0 .75rem; }
+ input { flex: 1; min-width: 0; padding: .6rem .7rem; font: inherit;
+         border: 1px solid #999; border-radius: 6px; background: transparent;
+         color: inherit; }
+ button { padding: .6rem 1.1rem; font: inherit; border: 0; border-radius: 6px;
+          background: #2563eb; color: #fff; cursor: pointer; }
+ button:disabled { opacity: .5; cursor: default; }
+ .examples button { background: transparent; color: #2563eb;
+                    border: 1px solid #2563eb; padding: .3rem .6rem;
+                    font-size: .85rem; margin: 0 .4rem .4rem 0; }
+ pre { background: #8881; padding: .7rem; border-radius: 6px; overflow-x: auto;
+       font-size: .85rem; }
+ table { border-collapse: collapse; width: 100%; font-size: .9rem; }
+ th, td { text-align: left; padding: .35rem .6rem; border-bottom: 1px solid var(--line); }
+ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+ .err { color: #b91c1c; }
+ #map { height: 26rem; border-radius: 8px; border: 1px solid var(--line);
+        margin-top: .5rem; }
+ .legend { font-size: .8rem; color: var(--dim); margin: .5rem 0 0;
+           display: flex; gap: 1rem; flex-wrap: wrap; align-items: center; }
+ .dot { display: inline-block; width: .7rem; height: .7rem; border-radius: 50%;
+        margin-right: .3rem; vertical-align: -1px; }
+ .panel { border: 1px solid var(--line); border-radius: 8px; padding: 1rem;
+          margin-top: 1rem; }
+ .figs { display: flex; gap: 2rem; flex-wrap: wrap; margin: .5rem 0 1rem; }
+ .fig b { display: block; font-size: 1.5rem; font-variant-numeric: tabular-nums; }
+ .fig span { color: var(--dim); font-size: .8rem; }
+ .bar { background: #2563eb; height: .7rem; border-radius: 2px; display: inline-block;
+        vertical-align: -1px; }
+ footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--line);
+          font-size: .85rem; color: var(--dim); }
+</style>
+</head>
+<body>
+
+<h1>Can you trust your bus?</h1>
+<p class="sub">Every arrival below was measured, not scheduled. The live OC Transpo
+feed was polled every 45 seconds and compared against the published timetable.
+Apps tell you when a bus is due. This says how often it actually turns up on time.</p>
+
+<h2>Ask it anything</h2>
+<form id="f">
+  <input id="q" placeholder="Which routes are latest at 5pm?" autocomplete="off">
+  <button id="go">Ask</button>
+</form>
+<div class="examples">
+  <button type="button">Which routes are latest at 5pm?</button>
+  <button type="button">What hour of the day has the worst delays?</button>
+  <button type="button">Which stops do buses arrive early at?</button>
+  <button type="button">How many arrivals were within a minute of schedule?</button>
+</div>
+<div id="out"></div>
+
+<h2>Or find your stop</h2>
+<p class="sub">Each dot is a stop, coloured by how late buses usually are there.
+Click one.</p>
+<input id="search" placeholder="Search a stop by name, e.g. HURDMAN" autocomplete="off">
+<div id="map"></div>
+<p class="legend">
+  <span><i class="dot" style="background:#16a34a"></i>within a minute</span>
+  <span><i class="dot" style="background:#eab308"></i>up to 3 min late</span>
+  <span><i class="dot" style="background:#f97316"></i>up to 5 min late</span>
+  <span><i class="dot" style="background:#dc2626"></i>more than 5 min late</span>
+  <span id="stopcount"></span>
+</p>
+<div id="stop"></div>
+
+<footer>
+  The SQL for your question is written by a language model, then checked before
+  it runs: a single SELECT, a read-only connection with no file access, a row
+  limit and a timeout.
+  <a href="https://github.com/akshaychauhan28/DuckStream-live-transit">Source and
+  method</a>.
+</footer>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const out = document.getElementById("out");
+const q = document.getElementById("q");
+const go = document.getElementById("go");
+const form = document.getElementById("f");
+const stopBox = document.getElementById("stop");
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, function (c) {
+    return {"&": "&amp;", "<": "&lt;", ">": "&gt;",
+            '"': "&quot;", "'": "&#39;"}[c];
+  });
+}
+
+function mins(sec) {
+  const s = Math.round(sec);
+  if (Math.abs(s) < 60) return s + "s";
+  const m = Math.floor(Math.abs(s) / 60), r = Math.abs(s) % 60;
+  return (s < 0 ? "-" : "") + m + "m" + (r ? " " + r + "s" : "");
+}
+
+/* ---------- ask ---------- */
+
+document.querySelectorAll(".examples button").forEach(function (b) {
+  b.onclick = function () { q.value = b.textContent; form.requestSubmit(); };
+});
+
+form.onsubmit = async function (e) {
+  e.preventDefault();
+  if (!q.value.trim()) return;
+  go.disabled = true;
+  out.innerHTML = "<p>Thinking...</p>";
+  try {
+    const r = await fetch("/ask", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({question: q.value})
+    });
+    const d = await r.json();
+    let html = "";
+    if (d.sql) html += "<pre>" + esc(d.sql) + "</pre>";
+    if (d.error) {
+      html += '<p class="err">' + esc(d.error) + "</p>";
+    } else if (d.rows) {
+      if (!d.rows.length) {
+        html += "<p>No rows came back.</p>";
+      } else {
+        html += "<table><tr>";
+        d.columns.forEach(function (c) { html += "<th>" + esc(c) + "</th>"; });
+        html += "</tr>";
+        d.rows.forEach(function (row) {
+          html += "<tr>";
+          row.forEach(function (v) {
+            html += "<td>" + esc(v === null ? "" : v) + "</td>";
+          });
+          html += "</tr>";
+        });
+        html += "</table>";
+      }
+      if (d.cached) html += '<p class="sub">(cached)</p>';
+    }
+    out.innerHTML = html;
+  } catch (err) {
+    out.innerHTML = '<p class="err">Something went wrong. Try again.</p>';
+  }
+  go.disabled = false;
+};
+
+/* ---------- map ---------- */
+
+const map = L.map("map", {scrollWheelZoom: false}).setView([45.4215, -75.6972], 11);
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 18,
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+}).addTo(map);
+
+const canvas = L.canvas({padding: 0.4});
+
+function colour(d) {
+  if (d <= 60) return "#16a34a";
+  if (d <= 180) return "#eab308";
+  if (d <= 300) return "#f97316";
+  return "#dc2626";
+}
+
+let stops = [];
+const markers = {};
+
+fetch("/stops").then(r => r.json()).then(function (data) {
+  stops = data.stops;
+  document.getElementById("stopcount").textContent =
+    stops.length.toLocaleString() + " stops with at least " +
+    data.min_arrivals + " arrivals";
+  stops.forEach(function (s) {
+    const m = L.circleMarker([s.la, s.lo], {
+      renderer: canvas, radius: 4, weight: 0,
+      fillColor: colour(s.d), fillOpacity: 0.75
+    }).addTo(map);
+    m.bindTooltip(s.n + " — " + mins(s.d) + " typical");
+    m.on("click", function () { showStop(s.id); });
+    markers[s.id] = m;
+  });
+});
+
+document.getElementById("search").addEventListener("input", function (e) {
+  const term = e.target.value.trim().toUpperCase();
+  if (term.length < 3) return;
+  const hit = stops.find(s => s.n && s.n.toUpperCase().includes(term));
+  if (hit) {
+    map.setView([hit.la, hit.lo], 15);
+    markers[hit.id].openTooltip();
+    showStop(hit.id);
+  }
+});
+
+async function showStop(id) {
+  stopBox.innerHTML = '<div class="panel">Loading...</div>';
+  const r = await fetch("/stop/" + encodeURIComponent(id));
+  const d = await r.json();
+  if (d.error) {
+    stopBox.innerHTML = '<div class="panel err">' + esc(d.error) + "</div>";
+    return;
+  }
+
+  let html = '<div class="panel"><h3 style="margin:0 0 .25rem">' +
+             esc(d.stop_name || d.stop_id) + "</h3>";
+  html += '<p class="sub" style="margin:0">' + d.arrivals.toLocaleString() +
+          " measured arrivals</p>";
+  html += '<div class="figs">' +
+    '<div class="fig"><b>' + mins(d.median_delay) + "</b><span>typical delay</span></div>" +
+    '<div class="fig"><b>' + d.pct_on_time + "%</b><span>within a minute</span></div>" +
+    '<div class="fig"><b>' + d.pct_very_late + "%</b><span>over 5 min late</span></div>" +
+    "</div>";
+
+  if (d.by_hour.length) {
+    const worst = Math.max.apply(null, d.by_hour.map(h => Math.abs(h.d))) || 1;
+    html += "<table><tr><th>Hour</th><th class='num'>Arrivals</th>" +
+            "<th class='num'>Typical delay</th><th></th></tr>";
+    d.by_hour.forEach(function (h) {
+      const w = Math.round(Math.max(h.d, 0) / worst * 100);
+      html += "<tr><td>" + String(h.h).padStart(2, "0") + ":00</td>" +
+              "<td class='num'>" + h.n + "</td>" +
+              "<td class='num'>" + mins(h.d) + "</td>" +
+              '<td><i class="bar" style="width:' + w + '%;background:' +
+              colour(h.d) + '"></i></td></tr>';
+    });
+    html += "</table>";
+  }
+
+  if (d.by_route.length) {
+    html += "<h3 style='font-size:.95rem;margin:1.25rem 0 .25rem'>Routes here, worst first</h3>";
+    html += "<table><tr><th>Route</th><th class='num'>Arrivals</th>" +
+            "<th class='num'>Typical delay</th><th class='num'>Over 5 min</th></tr>";
+    d.by_route.forEach(function (r) {
+      html += "<tr><td>" + esc(r.route) + "</td><td class='num'>" + r.n +
+              "</td><td class='num'>" + mins(r.d) + "</td><td class='num'>" +
+              r.late + "%</td></tr>";
+    });
+    html += "</table>";
+  }
+
+  html += "</div>";
+  stopBox.innerHTML = html;
+  stopBox.scrollIntoView({behavior: "smooth", block: "nearest"});
+}
+</script>
+</body>
+</html>

@@ -16,11 +16,13 @@ and a cached answer costs nothing.
 
 import os
 import sys
+import threading
 import time
 from collections import defaultdict, deque
 from pathlib import Path
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
@@ -50,6 +52,17 @@ RATE_LIMIT = 20          # questions per client
 RATE_WINDOW = 300        # seconds
 
 app = FastAPI(title="DuckStream", docs_url=None, redoc_url=None)
+
+# The stop list is a few hundred kilobytes of JSON and compresses to a fraction
+# of that, which matters on a free instance.
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+# One DuckDB connection is shared by every request, and FastAPI runs sync
+# endpoints in a thread pool, so two questions arriving together would use it
+# concurrently. Serialising is the right trade here: queries are milliseconds
+# and the alternative is a connection per request against a file that never
+# changes.
+_db_lock = threading.Lock()
 
 _cache: dict[str, dict] = {}
 _seen: deque = deque()
@@ -95,8 +108,91 @@ def remember(key: str, value: dict) -> dict:
 @app.get("/health")
 def health():
     con = connection()
-    rows = con.execute("SELECT count(*) FROM arrivals").fetchone()[0]
+    with _db_lock:
+        rows = con.execute("SELECT count(*) FROM arrivals").fetchone()[0]
     return {"status": "ok", "arrivals": rows}
+
+
+# Stops with fewer arrivals than this are left off the map. Their medians move
+# on a handful of buses and would read as real hotspots.
+MIN_ARRIVALS = 30
+
+_stops_cache: list | None = None
+
+
+@app.get("/stops")
+def stops():
+    """Every stop worth plotting, with how reliable it has been."""
+    global _stops_cache
+    if _stops_cache is None:
+        con = connection()
+        with _db_lock:
+            rows = con.execute(f"""
+                SELECT stop_id, any_value(stop_name), any_value(stop_lat),
+                       any_value(stop_lon), count(*),
+                       CAST(median(delay_seconds) AS INTEGER),
+                       CAST(100.0 * sum(CASE WHEN abs(delay_seconds) <= 60
+                                             THEN 1 ELSE 0 END)
+                            / count(*) AS INTEGER)
+                FROM arrivals
+                WHERE stop_lat IS NOT NULL
+                GROUP BY stop_id
+                HAVING count(*) >= {MIN_ARRIVALS}
+            """).fetchall()
+        # Short keys because this is a few thousand rows going over the wire.
+        _stops_cache = [
+            {"id": r[0], "n": r[1], "la": r[2], "lo": r[3],
+             "c": r[4], "d": r[5], "p": r[6]}
+            for r in rows
+        ]
+    return {"stops": _stops_cache, "min_arrivals": MIN_ARRIVALS}
+
+
+@app.get("/stop/{stop_id}")
+def stop_detail(stop_id: str):
+    """How reliable one stop has been, by hour and by route."""
+    con = connection()
+    with _db_lock:
+        summary = con.execute("""
+            SELECT any_value(stop_name), count(*),
+                   CAST(median(delay_seconds) AS INTEGER),
+                   CAST(100.0 * sum(CASE WHEN abs(delay_seconds) <= 60
+                                         THEN 1 ELSE 0 END) / count(*) AS INTEGER),
+                   CAST(100.0 * sum(CASE WHEN delay_seconds > 300
+                                         THEN 1 ELSE 0 END) / count(*) AS INTEGER)
+            FROM arrivals WHERE stop_id = ?
+        """, [stop_id]).fetchone()
+
+        if not summary or not summary[1]:
+            return JSONResponse({"error": "No arrivals recorded at that stop."},
+                                status_code=404)
+
+        by_hour = con.execute("""
+            SELECT hour_local, count(*), CAST(median(delay_seconds) AS INTEGER)
+            FROM arrivals WHERE stop_id = ?
+            GROUP BY hour_local HAVING count(*) >= 5 ORDER BY hour_local
+        """, [stop_id]).fetchall()
+
+        by_route = con.execute("""
+            SELECT route_name, count(*), CAST(median(delay_seconds) AS INTEGER),
+                   CAST(100.0 * sum(CASE WHEN delay_seconds > 300
+                                         THEN 1 ELSE 0 END) / count(*) AS INTEGER)
+            FROM arrivals WHERE stop_id = ? AND route_name IS NOT NULL
+            GROUP BY route_name HAVING count(*) >= 5
+            ORDER BY median(delay_seconds) DESC LIMIT 10
+        """, [stop_id]).fetchall()
+
+    return {
+        "stop_id": stop_id,
+        "stop_name": summary[0],
+        "arrivals": summary[1],
+        "median_delay": summary[2],
+        "pct_on_time": summary[3],
+        "pct_very_late": summary[4],
+        "by_hour": [{"h": h, "n": n, "d": d} for h, n, d in by_hour],
+        "by_route": [{"route": r, "n": n, "d": d, "late": late}
+                     for r, n, d, late in by_route],
+    }
 
 
 @app.post("/ask")
@@ -125,13 +221,14 @@ def ask(body: Ask, request: Request):
         return JSONResponse({"error": str(exc)}, status_code=503)
 
     try:
-        rows = run(con, sql, limit=ROW_LIMIT, timeout=QUERY_TIMEOUT)
+        with _db_lock:
+            rows = run(con, sql, limit=ROW_LIMIT, timeout=QUERY_TIMEOUT)
+            columns = [d[0] for d in con.description] if con.description else []
     except GuardrailError as exc:
         # The generated SQL is returned either way. The point of the project is
         # that an answer can be checked, including when it is refused.
         return JSONResponse({"error": str(exc), "sql": sql}, status_code=400)
 
-    columns = [d[0] for d in con.description] if con.description else []
     answer = {
         "sql": sql,
         "columns": columns,
@@ -141,115 +238,9 @@ def ask(body: Ask, request: Request):
     return remember(key, answer)
 
 
-PAGE = """<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>DuckStream &mdash; ask Ottawa transit data</title>
-<style>
- :root { color-scheme: light dark; }
- body { font: 16px/1.5 system-ui, sans-serif; max-width: 52rem; margin: 0 auto;
-        padding: 2rem 1rem; }
- h1 { font-size: 1.4rem; margin-bottom: .25rem; }
- p.sub { color: #777; margin-top: 0; }
- form { display: flex; gap: .5rem; margin: 1.5rem 0 1rem; }
- input { flex: 1; padding: .6rem .7rem; font: inherit; border: 1px solid #999;
-         border-radius: 6px; background: transparent; color: inherit; }
- button { padding: .6rem 1.1rem; font: inherit; border: 0; border-radius: 6px;
-          background: #2563eb; color: #fff; cursor: pointer; }
- button:disabled { opacity: .5; cursor: default; }
- .examples button { background: transparent; color: #2563eb;
-                    border: 1px solid #2563eb; padding: .3rem .6rem;
-                    font-size: .85rem; margin: 0 .4rem .4rem 0; }
- pre { background: #8881; padding: .7rem; border-radius: 6px; overflow-x: auto;
-       font-size: .85rem; }
- table { border-collapse: collapse; width: 100%; font-size: .9rem; }
- th, td { text-align: left; padding: .35rem .6rem; border-bottom: 1px solid #8883; }
- .err { color: #b91c1c; }
- footer { margin-top: 2.5rem; font-size: .85rem; color: #777; }
-</style></head><body>
-<h1>Ask Ottawa's buses a question</h1>
-<p class="sub">Real arrivals, collected every 45 seconds from the live OC Transpo
-feed and joined to the published timetable.</p>
-
-<form id="f">
-  <input id="q" placeholder="Which routes are latest at 5pm?" autocomplete="off">
-  <button id="go">Ask</button>
-</form>
-
-<div class="examples">
-  <button type="button">Which routes are latest at 5pm?</button>
-  <button type="button">What hour of the day has the worst delays?</button>
-  <button type="button">Which stops do buses arrive early at?</button>
-  <button type="button">How many arrivals were within a minute of schedule?</button>
-</div>
-
-<div id="out"></div>
-
-<footer>
-  The SQL is written by a language model, then checked before it runs: one
-  SELECT, read-only, no file access, a row limit and a timeout.
-  <a href="https://github.com/akshaychauhan28/DuckStream-live-transit">Source</a>.
-</footer>
-
-<script>
-const out = document.getElementById("out");
-const q = document.getElementById("q");
-const go = document.getElementById("go");
-const form = document.getElementById("f");
-
-function esc(s) {
-  return String(s).replace(/[&<>"']/g, function (c) {
-    return {"&": "&amp;", "<": "&lt;", ">": "&gt;",
-            '"': "&quot;", "'": "&#39;"}[c];
-  });
-}
-
-document.querySelectorAll(".examples button").forEach(function (b) {
-  b.onclick = function () { q.value = b.textContent; form.requestSubmit(); };
-});
-
-form.onsubmit = async function (e) {
-  e.preventDefault();
-  if (!q.value.trim()) return;
-  go.disabled = true;
-  out.innerHTML = "<p>Thinking...</p>";
-  try {
-    const r = await fetch("/ask", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({question: q.value})
-    });
-    const d = await r.json();
-    let html = "";
-    if (d.sql) html += "<pre>" + esc(d.sql) + "</pre>";
-    if (d.error) {
-      html += '<p class="err">' + esc(d.error) + "</p>";
-    } else if (d.rows) {
-      if (!d.rows.length) {
-        html += "<p>No rows came back.</p>";
-      } else {
-        html += "<table><tr>";
-        d.columns.forEach(function (c) { html += "<th>" + esc(c) + "</th>"; });
-        html += "</tr>";
-        d.rows.forEach(function (row) {
-          html += "<tr>";
-          row.forEach(function (v) {
-            html += "<td>" + esc(v === null ? "" : v) + "</td>";
-          });
-          html += "</tr>";
-        });
-        html += "</table>";
-      }
-      if (d.cached) html += '<p class="sub">(cached)</p>';
-    }
-    out.innerHTML = html;
-  } catch (err) {
-    out.innerHTML = '<p class="err">Something went wrong. Try again.</p>';
-  }
-  go.disabled = false;
-};
-</script>
-</body></html>"""
+# The page lives in its own file. It had outgrown being a Python string, and
+# an editor is a great deal more useful when it knows it is looking at HTML.
+PAGE = (Path(__file__).resolve().parent / "page.html").read_text(encoding="utf-8")
 
 
 @app.get("/", response_class=HTMLResponse)

@@ -23,11 +23,16 @@ def client(tmp_path, monkeypatch):
     con = duckdb.connect(str(db))
     con.execute("""
         CREATE TABLE arrivals AS
-        SELECT 'route ' || (i % 3) AS route_name,
-               'stop ' || (i % 7)  AS stop_name,
-               i * 11 - 200        AS delay_seconds,
-               (i % 24)            AS hour_local
-        FROM range(300) t(i)
+        SELECT 'route ' || (i % 3)      AS route_name,
+               'S' || (i % 7)           AS stop_id,
+               'stop ' || (i % 7)       AS stop_name,
+               45.40 + (i % 7) * 0.01   AS stop_lat,
+               -75.70 - (i % 7) * 0.01  AS stop_lon,
+               i * 11 - 200             AS delay_seconds,
+               (i % 6)                  AS hour_local
+        -- Enough rows that each stop-and-hour clears the minimum the endpoints
+        -- apply, since a median built on three buses is noise.
+        FROM range(3000) t(i)
     """)
     con.execute("CREATE TABLE about (topic VARCHAR, detail VARCHAR)")
     con.execute("INSERT INTO about VALUES ('delay_seconds', 'Positive means late.')")
@@ -54,14 +59,59 @@ def test_health_reports_row_count(client):
     app, main = client
     body = app.get("/health").json()
     assert body["status"] == "ok"
-    assert body["arrivals"] == 300
+    assert body["arrivals"] == 3000
 
 
 def test_home_page_renders(client):
     app, _ = client
     page = app.get("/")
     assert page.status_code == 200
-    assert "Ask Ottawa's buses" in page.text
+    assert "Can you trust your bus?" in page.text
+    assert "leaflet" in page.text.lower(), "the map library should be loaded"
+
+
+def test_stops_are_listed_with_coordinates(client):
+    app, main = client
+    body = app.get("/stops").json()
+
+    assert body["min_arrivals"] == main.MIN_ARRIVALS
+    assert len(body["stops"]) == 7
+    for stop in body["stops"]:
+        assert 44 < stop["la"] < 46 and -77 < stop["lo"] < -74
+        assert stop["c"] >= main.MIN_ARRIVALS
+        assert 0 <= stop["p"] <= 100
+
+
+def test_quiet_stops_are_left_off_the_map(client):
+    """A median built on three buses is noise, not a hotspot."""
+    app, main = client
+    body = app.get("/stops").json()
+    assert all(s["c"] >= main.MIN_ARRIVALS for s in body["stops"])
+
+
+def test_stop_detail_breaks_down_by_hour_and_route(client):
+    app, _ = client
+    detail = app.get("/stop/S3").json()
+
+    assert detail["stop_name"] == "stop 3"
+    assert detail["arrivals"] > 0
+    assert 0 <= detail["pct_on_time"] <= 100
+    assert detail["by_hour"], "expected an hourly breakdown"
+    assert detail["by_route"], "expected a per-route breakdown"
+    assert all(set(h) == {"h", "n", "d"} for h in detail["by_hour"])
+
+
+def test_an_unknown_stop_is_a_404(client):
+    app, _ = client
+    assert app.get("/stop/nope").status_code == 404
+
+
+def test_stop_id_is_not_interpolated_into_sql(client):
+    """The id comes from a URL, so it is a parameter, never string-joined."""
+    app, _ = client
+    reply = app.get("/stop/' OR 1=1 --")
+    assert reply.status_code == 404
+    assert app.get("/health").json()["arrivals"] == 3000
 
 
 def test_a_question_returns_rows_and_the_sql(client):
@@ -96,7 +146,7 @@ def test_dangerous_sql_from_the_model_is_refused(client):
     assert reply.status_code == 400
     assert "SELECT" in reply.json()["error"]
     # and the table is still there
-    assert app.get("/health").json()["arrivals"] == 300
+    assert app.get("/health").json()["arrivals"] == 3000
 
 
 def test_file_reading_sql_is_refused(client):
