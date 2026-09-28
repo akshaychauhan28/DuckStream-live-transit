@@ -12,7 +12,7 @@ now, and there is no endpoint that returns last Tuesday. Miss 05:00-09:00 and
 that rush hour is permanently gone.
 
 So the design rule here is: fewer moving parts than anything else in the repo.
-Everything downstream (decode -> Redpanda -> Polars -> Parquet) replays from
+Everything downstream (decode -> dedupe -> Parquet -> DuckDB) replays from
 the files this writes, which means a bug in the transform layer costs a replay,
 not data.
 

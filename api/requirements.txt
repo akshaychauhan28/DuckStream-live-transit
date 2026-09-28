@@ -1,7 +1,7 @@
 # Just what the demo needs to serve requests.
 #
-# The project's main requirements.txt pulls polars, pyarrow, protobuf and a
-# Kafka client, none of which this endpoint touches. On a 512 MB free instance
+# The project's main requirements.txt pulls polars, pyarrow and protobuf, which
+# building the lake needs and this endpoint does not. On a 512 MB free instance
 # that is wasted build time and wasted memory.
 fastapi
 uvicorn[standard]

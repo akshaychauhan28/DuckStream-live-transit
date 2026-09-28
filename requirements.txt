@@ -1,19 +1,17 @@
 # Verified to have wheels on Python 3.14 (probed 2026-08-21).
-# Versions intentionally unpinned during Phase 1; pin with `pip freeze` once
-# the pipeline is stable so the archive is reproducible.
+#
+# The deployed demo installs api/requirements.txt instead, which is a much
+# shorter list. This file is what building the lake from raw needs.
 
-# --- Capture (this is all the Space needs — keep it minimal) ---------------
+# --- Capture (this is all the collector needs — keep it minimal) -----------
 requests
 
-# --- Running capture in a Hugging Face Space, and pulling the archive back --
+# --- Only for space/, which is not the collector that runs. See DECISIONS #11.
 huggingface_hub
 
 # --- Ingestion / decode ----------------------------------------------------
 gtfs-realtime-bindings
 protobuf
-
-# --- Streaming -------------------------------------------------------------
-confluent-kafka
 
 # Timezone database. Windows ships none of its own, so zoneinfo has nothing to
 # read and converting Ottawa local schedule times to UTC fails outright.
@@ -24,7 +22,7 @@ polars
 pyarrow
 duckdb
 
-# --- API layer (Phase 4) ---------------------------------------------------
+# --- API layer -------------------------------------------------------------
 fastapi
 uvicorn
 pydantic

@@ -233,6 +233,29 @@ in theory.
 fan-out*. They cover what the other is bad at. Claiming the broker was needed
 for throughput would be false and easy to catch.
 
+### Reversed — cut 2026-09-29
+
+The broker was never built. `ingestion/docker-compose.yml`, `replay.py` and
+`processing/consumer.py` are removed; git history keeps them.
+
+What was already true above is what settled it. The raw archive provides the
+durability and replay, so the broker's remaining job was fan-out to a single
+consumer, and there is no second consumer to fan out to. `storage/writer.py`
+reads frames, decodes, deduplicates and writes Parquet in one pass, and a
+rebuild takes under a minute per day. Putting a Kafka hop in the middle of that
+would have added an install, a running service and a delivery-semantics problem
+to a pipeline whose actual bottleneck is protobuf decoding.
+
+The honest reason it was in the plan was to have worked with topics, partitions
+and offsets rather than only read about them. That is a good reason to learn
+Kafka and a bad reason to put it in this pipeline, and the two are easy to
+confuse when the diagram looks impressive either way.
+
+What the project has instead, and what the broker would have provided: replay
+from an immutable log (the raw archive), idempotent reprocessing (rebuild whole
+days rather than append), and bounded memory over a stream too large to hold
+(one day at a time).
+
 ---
 
 ## 7. Partitioning strategy — **OPEN, decided in Phase 2 by measurement**
