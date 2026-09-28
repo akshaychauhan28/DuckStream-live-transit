@@ -30,6 +30,17 @@ from guardrails import GuardrailError, open_connection, run  # noqa: E402
 from nl_to_sql import ModelError, describe, generate_sql  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# Load .env when running locally, if python-dotenv happens to be installed.
+# On Render the values come from the dashboard, so this is a convenience and
+# never a dependency - it is deliberately absent from api/requirements.txt.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(ROOT / ".env")
+except ImportError:
+    pass
+
 DB_PATH = os.environ.get("DEMO_DB", str(ROOT / "data" / "demo.duckdb"))
 
 ROW_LIMIT = 100

@@ -37,6 +37,8 @@ Rules:
   it from scheduled_at and arrived_at.
 - Prefer median(delay_seconds) over avg, because a few very late buses drag an
   average badly.
+- "late", "latest", "worst" and "delayed" all mean large delay_seconds. They
+  never mean the most recent arrival time.
 - Use route_name and stop_name in results, not the id columns, so answers are
   readable.
 - Add a sensible LIMIT when returning rows rather than an aggregate.
