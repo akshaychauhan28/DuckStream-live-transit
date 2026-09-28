@@ -49,7 +49,7 @@ import duckdb  # noqa: E402
 import polars as pl  # noqa: E402
 
 from gtfs_time import scheduled_epoch  # noqa: E402
-from static_gtfs import bundle_for  # noqa: E402
+from static_gtfs import bundle_for_measured  # noqa: E402
 
 PARQUET = ROOT / "data" / "parquet"
 OUT = ROOT / "data" / "demo.duckdb"
@@ -78,11 +78,29 @@ def main() -> int:
         print("No prediction data found. Run storage/writer.py first.")
         return 1
 
-    bundles = {d: bundle_for(d) for d in dates}
-    bundle_path = ROOT / bundles[dates[-1]]["path"]
-    stop_times = str(bundle_path / "stop_times.parquet").replace("\\", "/")
-    stops = str(bundle_path / "stops.parquet").replace("\\", "/")
-    routes = str(bundle_path / "routes.parquet").replace("\\", "/")
+    # Each day is joined to the timetable that actually matches it, chosen by
+    # trip_id overlap rather than by the dates a bundle declares about itself.
+    # Days with no matching version are left out and reported, because a delay
+    # computed against the wrong timetable looks completely normal.
+    bundles, skipped = {}, []
+    for day in dates:
+        try:
+            bundles[day] = bundle_for_measured(day)
+        except LookupError:
+            skipped.append(day)
+    dates = [d for d in dates if d in bundles]
+    if not dates:
+        print("No day matches a held timetable. Fetch the versions in force.")
+        return 1
+
+    # Group the days that share a timetable, so each group is one join.
+    groups = {}
+    for day in dates:
+        groups.setdefault(bundles[day]["path"], []).append(day)
+
+    newest = ROOT / bundles[dates[-1]]["path"]
+    stops = str(newest / "stops.parquet").replace("\\", "/")
+    routes = str(newest / "routes.parquet").replace("\\", "/")
 
     # One conversion per service date, using the tested noon-minus-12h rule,
     # handed to SQL as a lookup.
@@ -99,74 +117,91 @@ def main() -> int:
 
     con = duckdb.connect(str(out_path))
     con.register("bases", bases)
-    date_list = ", ".join(f"'{d}'" for d in dates)
 
     print(f"days           {len(dates)}  ({dates[0]} to {dates[-1]})")
-    print(f"timetable      {sorted({b['feed_version'] for b in bundles.values()})[0]}")
+    for path, days in groups.items():
+        version = bundles[days[0]]
+        print(f"timetable      {version['feed_version']}  "
+              f"{len(days)} day(s), {version['match_rate']:.1f}% trip_id match")
+    if skipped:
+        print(f"skipped        {len(skipped)} day(s) with no matching timetable: "
+              f"{skipped[0]} to {skipped[-1]}")
     print("building arrivals ...")
 
-    con.execute(f"""
-        CREATE TABLE arrivals AS
+    # One pass per timetable version, each over only the days it matches,
+    # unioned into a single table. The first group creates it; the rest
+    # append.
+    def arrivals_sql(dates_sql: str, stop_times: str) -> str:
+        return f"""
         WITH final AS (
-            SELECT trip_id, start_date, stop_sequence, arrival_time, last_seen,
-                   row_number() OVER (
-                       PARTITION BY trip_id, start_date, stop_sequence
-                       ORDER BY last_seen DESC
-                   ) AS rn
-            FROM read_parquet('{predictions}')
-            WHERE arrival_time IS NOT NULL
-              AND start_date IN ({date_list})
+        SELECT trip_id, start_date, stop_sequence, arrival_time, last_seen,
+        row_number() OVER (
+        PARTITION BY trip_id, start_date, stop_sequence
+        ORDER BY last_seen DESC
+        ) AS rn
+        FROM read_parquet('{predictions}')
+        WHERE arrival_time IS NOT NULL
+        AND start_date IN ({dates_sql})
         ),
         approached AS (
-            SELECT trip_id, start_date, stop_sequence, arrival_time
-            FROM final
-            WHERE rn = 1 AND arrival_time - last_seen BETWEEN 0 AND {ARRIVAL_WINDOW}
+        SELECT trip_id, start_date, stop_sequence, arrival_time
+        FROM final
+        WHERE rn = 1 AND arrival_time - last_seen BETWEEN 0 AND {ARRIVAL_WINDOW}
         ),
         with_schedule AS (
-            SELECT a.trip_id, a.start_date, a.stop_sequence, a.arrival_time,
-                   b.base_epoch + (
-                       3600 * CAST(split_part(st.arrival_time, ':', 1) AS BIGINT)
-                       + 60 * CAST(split_part(st.arrival_time, ':', 2) AS BIGINT)
-                       + CAST(split_part(st.arrival_time, ':', 3) AS BIGINT)
-                   ) AS scheduled_epoch,
-                   st.stop_id
-            FROM approached a
-            JOIN bases b ON b.start_date = a.start_date
-            JOIN read_parquet('{stop_times}') st
-              ON st.trip_id = a.trip_id
-             AND CAST(st.stop_sequence AS INTEGER) = a.stop_sequence
-            WHERE st.arrival_time IS NOT NULL
+        SELECT a.trip_id, a.start_date, a.stop_sequence, a.arrival_time,
+        b.base_epoch + (
+        3600 * CAST(split_part(st.arrival_time, ':', 1) AS BIGINT)
+        + 60 * CAST(split_part(st.arrival_time, ':', 2) AS BIGINT)
+        + CAST(split_part(st.arrival_time, ':', 3) AS BIGINT)
+        ) AS scheduled_epoch,
+        st.stop_id
+        FROM approached a
+        JOIN bases b ON b.start_date = a.start_date
+        JOIN read_parquet('{stop_times}') st
+        ON st.trip_id = a.trip_id
+        AND CAST(st.stop_sequence AS INTEGER) = a.stop_sequence
+        WHERE st.arrival_time IS NOT NULL
         ),
         named AS (
-            SELECT w.*, t.route_id, s.stop_name, r.route_short_name, r.route_long_name
-            FROM with_schedule w
-            LEFT JOIN (
-                SELECT DISTINCT trip_id, start_date, route_id
-                FROM read_parquet('{trips}') WHERE route_id IS NOT NULL
-            ) t USING (trip_id, start_date)
-            LEFT JOIN read_parquet('{stops}') s ON s.stop_id = w.stop_id
-            LEFT JOIN read_parquet('{routes}') r ON r.route_id = t.route_id
+        SELECT w.*, t.route_id, s.stop_name, r.route_short_name, r.route_long_name
+        FROM with_schedule w
+        LEFT JOIN (
+        SELECT DISTINCT trip_id, start_date, route_id
+        FROM read_parquet('{trips}') WHERE route_id IS NOT NULL
+        ) t USING (trip_id, start_date)
+        LEFT JOIN read_parquet('{stops}') s ON s.stop_id = w.stop_id
+        LEFT JOIN read_parquet('{routes}') r ON r.route_id = t.route_id
         )
         SELECT
-            route_id,
-            coalesce(route_short_name, route_id)                AS route_name,
-            route_long_name                                     AS route_description,
-            stop_id,
-            stop_name,
-            trip_id,
-            start_date                                          AS service_date,
-            to_timestamp(scheduled_epoch) AT TIME ZONE 'America/Toronto'
-                                                                AS scheduled_at,
-            to_timestamp(arrival_time) AT TIME ZONE 'America/Toronto'
-                                                                AS arrived_at,
-            arrival_time - scheduled_epoch                      AS delay_seconds,
-            CAST(strftime(to_timestamp(arrival_time)
-                 AT TIME ZONE 'America/Toronto', '%H') AS INTEGER) AS hour_local,
-            strftime(to_timestamp(arrival_time)
-                 AT TIME ZONE 'America/Toronto', '%A')           AS day_of_week
+        route_id,
+        coalesce(route_short_name, route_id)                AS route_name,
+        route_long_name                                     AS route_description,
+        stop_id,
+        stop_name,
+        trip_id,
+        start_date                                          AS service_date,
+        to_timestamp(scheduled_epoch) AT TIME ZONE 'America/Toronto'
+        AS scheduled_at,
+        to_timestamp(arrival_time) AT TIME ZONE 'America/Toronto'
+        AS arrived_at,
+        arrival_time - scheduled_epoch                      AS delay_seconds,
+        CAST(strftime(to_timestamp(arrival_time)
+        AT TIME ZONE 'America/Toronto', '%H') AS INTEGER) AS hour_local,
+        strftime(to_timestamp(arrival_time)
+        AT TIME ZONE 'America/Toronto', '%A')           AS day_of_week
         FROM named
         WHERE abs(arrival_time - scheduled_epoch) <= {SANE_DELAY}
-    """)
+        """
+
+    for index, (path, days) in enumerate(groups.items()):
+        stop_times = str(ROOT / path / "stop_times.parquet").replace("\\", "/")
+        dates_sql = ", ".join(f"'{d}'" for d in days)
+        select = arrivals_sql(dates_sql, stop_times)
+        if index == 0:
+            con.execute(f"CREATE TABLE arrivals AS {select}")
+        else:
+            con.execute(f"INSERT INTO arrivals {select}")
 
     rows = con.execute("SELECT count(*) FROM arrivals").fetchone()[0]
     print(f"arrivals       {rows:,}")

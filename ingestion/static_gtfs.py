@@ -61,6 +61,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 GTFS_DIR = ROOT / "data" / "gtfs"
 MANIFEST = GTFS_DIR / "manifest.json"
+LOG = ROOT / "logs" / "gtfs.log"
 
 URL = "https://oct-gtfs-emasagcnfmcgeham.z01.azurefd.net/public-access/GTFSExport.zip"
 USER_AGENT = (
@@ -85,6 +86,19 @@ TABLES = [
 # --------------------------------------------------------------------------
 # manifest
 # --------------------------------------------------------------------------
+
+def record(message: str) -> None:
+    """Print, and append to a log. A scheduled run has no console to watch, and
+    the whole point of scheduling this is to notice a republication."""
+    print(message)
+    try:
+        LOG.parent.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with LOG.open("a", encoding="utf-8") as fh:
+            fh.write(f"{stamp}  {message}" + chr(10))
+    except OSError:
+        pass  # never let logging break the download
+
 
 def load_manifest() -> dict:
     if MANIFEST.exists():
@@ -318,15 +332,95 @@ def main() -> int:
     version = result["version"]
 
     if result["status"] == "unchanged":
-        print(f"Unchanged — still on {version['feed_version']} "
-              f"({version['feed_start_date']} - {version['feed_end_date']}). "
-              f"No download needed.")
+        record(f"unchanged - still {version['feed_version']} "
+               f"({version['feed_start_date']} to {version['feed_end_date']})")
     else:
-        print(f"New bundle: {version['feed_version']}")
+        record(f"NEW BUNDLE {version['feed_version']} "
+               f"({version['feed_start_date']} to {version['feed_end_date']}), "
+               f"{version['zip_bytes']/1e6:.0f} MB -> {version['path']}")
         _print_version(version)
-        print(f"\nStored in {version['path']}")
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+# --------------------------------------------------------------------------
+# choosing a bundle by measurement rather than by its own metadata
+# --------------------------------------------------------------------------
+
+DEFAULT_PREDICTIONS = str(
+    ROOT / "data" / "parquet" / "predictions" / "dt=*" / "part.parquet"
+).replace("\\", "/")
+
+MINIMUM_MATCH = 90.0
+
+
+def measure_match(day, bundle: dict, predictions_glob: str = DEFAULT_PREDICTIONS,
+                  root: Path = ROOT) -> float:
+    """
+    Share of the trip_ids collected on `day` that exist in this bundle.
+
+    trip_id is an internal identifier. An agency regenerates them when it
+    republishes, so overlap is the only honest test of whether a bundle
+    describes the data.
+    """
+    import duckdb
+
+    stop_times = str(root / bundle["path"] / "stop_times.parquet").replace("\\", "/")
+    if not Path(stop_times).exists():
+        return 0.0
+
+    wanted = _as_date(day).strftime("%Y%m%d")
+    con = duckdb.connect()
+    try:
+        con.execute("SET enable_progress_bar=false")
+        return con.execute(f"""
+            SELECT 100.0 * count(DISTINCT CASE WHEN s.trip_id IS NOT NULL
+                                               THEN t.trip_id END)
+                   / nullif(count(DISTINCT t.trip_id), 0)
+            FROM (SELECT DISTINCT trip_id FROM read_parquet('{predictions_glob}')
+                  WHERE start_date = '{wanted}') t
+            LEFT JOIN (SELECT DISTINCT trip_id
+                       FROM read_parquet('{stop_times}')) s USING (trip_id)
+        """).fetchone()[0] or 0.0
+    finally:
+        con.close()
+
+
+def bundle_for_measured(day, predictions_glob: str = DEFAULT_PREDICTIONS,
+                        manifest: dict | None = None,
+                        minimum: float = MINIMUM_MATCH,
+                        root: Path = ROOT) -> dict:
+    """
+    Return the bundle whose trip_ids actually match the data collected on `day`.
+
+    This is what production code should call. bundle_for() reads the dates a
+    bundle declares about itself, and on 2026-09-28 that was shown to be
+    worthless: a bundle declaring coverage through 2026-10-10 matched 31% of
+    the trip_ids being collected, and the join quietly returned almost nothing.
+
+    Raises LookupError when nothing clears `minimum`, listing what was tried.
+    Refusing is the point — a delay computed against the wrong timetable looks
+    entirely normal and cannot be detected downstream.
+    """
+    manifest = manifest if manifest is not None else load_manifest()
+    scored = [
+        (measure_match(day, version, predictions_glob, root), version)
+        for version in manifest["versions"]
+    ]
+    if scored:
+        rate, best = max(scored, key=lambda pair: pair[0])
+        if rate >= minimum:
+            return {**best, "match_rate": rate, "approximate": False}
+
+    tried = ", ".join(
+        f"{version['feed_version']} {rate:.1f}%" for rate, version in scored
+    ) or "none held"
+    raise LookupError(
+        f"No timetable matches the data collected on {_as_date(day)}. "
+        f"Tried: {tried}. Minimum is {minimum:.0f}%. "
+        f"The version in force that day has to be fetched before delay can be "
+        f"computed for it."
+    )
