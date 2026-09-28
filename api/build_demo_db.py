@@ -164,7 +164,8 @@ def main() -> int:
         WHERE st.arrival_time IS NOT NULL
         ),
         named AS (
-        SELECT w.*, t.route_id, s.stop_name, r.route_short_name, r.route_long_name
+        SELECT w.*, t.route_id, s.stop_name, s.stop_lat, s.stop_lon,
+        r.route_short_name, r.route_long_name
         FROM with_schedule w
         LEFT JOIN (
         SELECT DISTINCT trip_id, start_date, route_id
@@ -179,8 +180,12 @@ def main() -> int:
         route_long_name                                     AS route_description,
         stop_id,
         stop_name,
+        -- Every column in the GTFS Parquet is text, so the coordinates need
+        -- casting. They are here so the stops can be put on a map.
+        CAST(stop_lat AS DOUBLE)                            AS stop_lat,
+        CAST(stop_lon AS DOUBLE)                            AS stop_lon,
         trip_id,
-        start_date                                          AS service_date,
+        strptime(start_date, '%Y%m%d')::DATE                AS service_date,
         to_timestamp(scheduled_epoch) AT TIME ZONE 'America/Toronto'
         AS scheduled_at,
         to_timestamp(arrival_time) AT TIME ZONE 'America/Toronto'
@@ -227,6 +232,19 @@ def main() -> int:
          "buses that vanished from the feed are absent, so this describes "
          "arrivals that happened rather than overall reliability."),
         ("timezone", "scheduled_at and arrived_at are Ottawa local time."),
+    ])
+
+    # Without this the model has no idea which dates exist, so a question like
+    # "last week" is answered against today's date and returns nothing.
+    span = con.execute(
+        "SELECT min(service_date), max(service_date), "
+        "count(DISTINCT service_date) FROM arrivals"
+    ).fetchone()
+    con.execute("INSERT INTO about VALUES (?, ?)", [
+        "dates covered",
+        f"{span[0]} to {span[1]}, {span[2]} days. Collection is ongoing and "
+        f"some days in that range are missing. Answer relative questions such "
+        f"as 'last week' from the dates present, not from today's date.",
     ])
 
     summary = con.execute("""
