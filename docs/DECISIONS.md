@@ -99,8 +99,35 @@ pick `-r0` again and overwrite data it had already uploaded. Files are now tagge
 with a run id (start time plus random characters) that cannot collide across a
 wipe. Hugging Face's own docs warn about exactly this.
 
-The laptop now downloads the archive from the Dataset repo instead of rsyncing
-from a VM. Everything downstream is unchanged.
+The Space plan was later abandoned; see decision #12 for the reversal.
+
+---
+
+## 12. Capture runs on an Android phone in Termux, not a Hugging Face Space — **2026-10-01**
+
+**Reverses #11 and supersedes the VM hosting and transfer plan in #2 and #3.**
+The Space was chosen as a free always-on host, but the
+Docker and Gradio features the deployment needed hit Hugging Face's PRO-tier
+wall. The Dataset upload and keep-alive also added
+moving parts and a five-minute window in which a Space restart could lose
+capture files.
+
+The Android phone already proved workable as the collector in Termux. It can
+poll OC Transpo directly and keep the immutable raw frames locally; the laptop
+pulls them over the LAN when it is awake. That is enough for this project's
+collection and replay workflow, without a hosted collector, Dataset repo, or
+upload scheduler.
+
+**Cost:** collection depends on the phone staying powered, connected, and
+awake enough to run Termux. Android may stop background work unless battery
+optimization is disabled, and the phone's storage is not a second copy. The
+laptop should pull the raw archive regularly. This has more operational limits
+than a reliable always-on VM, but it is a setup that actually runs and can be
+reproduced with the available hardware.
+
+The collector and archive format are unchanged. Only the host and transfer
+path changed; capture runs on the phone, while the laptop pulls the raw files
+over the local network.
 
 ---
 

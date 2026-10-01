@@ -6,7 +6,7 @@ raw, undecoded response bytes to hourly-rotated gzip files. That is all it does.
 
 It deliberately does NOT decode protobuf, validate, transform, dedupe, or
 publish to a broker. Every one of those is something that can throw, and this
-process runs unattended on a small VM collecting data that can never be
+process runs on the phone collecting data that can never be
 re-fetched. GTFS-RT is a *snapshot* feed — it reports where buses are right
 now, and there is no endpoint that returns last Tuesday. Miss 05:00-09:00 and
 that rush hour is permanently gone.
@@ -16,7 +16,7 @@ Everything downstream (decode -> dedupe -> Parquet -> DuckDB) replays from
 the files this writes, which means a bug in the transform layer costs a replay,
 not data.
 
-See docs/DECISIONS.md #2 and #3.
+See docs/DECISIONS.md #12.
 
 Run:
     python capture/capture.py
@@ -39,9 +39,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from frames import append_frame  # noqa: E402
 
 # Load .env when running locally, if python-dotenv happens to be installed.
-# On the VM it deliberately isn't — systemd supplies the environment from
-# /etc/duckstream/capture.env instead. So this is a local convenience, not a
-# dependency, and the VM install stays at exactly one package: requests.
+# On the phone, export settings in the Termux session; dotenv is optional, so
+# the collector itself still needs only requests.
 try:
     from dotenv import load_dotenv
 
@@ -129,11 +128,9 @@ class HourlyWriter:
          files with its own id.
 
     The run id is the run's start time plus a few random characters, rather
-    than a counter like -r0/-r1. A counter has to look at the directory to know
-    what already exists, which is fine on a machine that keeps its disk — but
-    a Hugging Face Space is wiped on every restart, so a restarted run would
-    find an empty directory, pick -r0 again, and overwrite data it had already
-    uploaded. A run id cannot collide across a wipe.
+    than a counter like -r0/-r1. A run id keeps filenames unique even when
+    capture restarts within the same hour and makes partial files easy to
+    distinguish from files written by a later run.
     """
 
     def __init__(self, output_dir: Path):

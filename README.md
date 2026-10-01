@@ -191,5 +191,5 @@ Kept here on purpose, because the claims above should be checkable.
 - The partitioning bake-off in [DECISIONS #7](docs/DECISIONS.md) was never run.
   Day partitioning was chosen on reasoning alone, which is exactly the kind of
   unmeasured choice this project otherwise avoids.
-- `space/` is a Hugging Face Space that was chosen in
-  [DECISIONS #11](docs/DECISIONS.md) and is not what runs.
+- Capture runs on an Android phone in Termux; see
+  [capture/DEPLOY.md](capture/DEPLOY.md) and [DECISIONS #12](docs/DECISIONS.md).

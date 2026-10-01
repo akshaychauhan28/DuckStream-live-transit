@@ -6,9 +6,6 @@
 # --- Capture (this is all the collector needs — keep it minimal) -----------
 requests
 
-# --- Only for space/, which is not the collector that runs. See DECISIONS #11.
-huggingface_hub
-
 # --- Ingestion / decode ----------------------------------------------------
 gtfs-realtime-bindings
 protobuf
