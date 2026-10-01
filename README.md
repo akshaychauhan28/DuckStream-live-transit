@@ -1,195 +1,173 @@
 # DuckStream
 
-A data pipeline that collects its own dataset. It polls Ottawa's live OC Transpo
-GTFS-Realtime feed, keeps every response, and turns the archive into a Parquet
-lake you can ask questions of in plain English.
+DuckStream is a data pipeline and web demo built around Ottawa's OC Transpo bus service. It collects live GTFS-Realtime data, preserves the original responses, turns them into an analytical dataset, and serves the results through a map and a natural-language question interface.
 
-**Live demo: https://duckstream-live-transit.onrender.com** — a map of every
-stop coloured by how late buses actually are there, and a question box.
+**[Open the live demo](https://duckstream-live-transit.onrender.com/)**
 
-The free instance sleeps after 15 minutes of no traffic, so the first request
-takes about 30 seconds to wake it.
+## Why this project exists
 
-## What it found
+GTFS-Realtime feeds describe what is happening now. They do not provide a history of what buses did in the past. If a response is not collected when it is published, it is gone.
 
-The interesting part is not the pipeline, it is what came out of it.
+DuckStream creates that history itself. Its central design choice is to keep the original feed responses as an immutable archive. The decoded tables, arrival estimates, and demo database can all be rebuilt from that archive as the analysis improves.
 
-**Buses are later than the published figures suggest.** Across 585,201 measured
-arrivals: the median bus arrives **167 seconds late**, only **23%** get within a
-minute of schedule, and **29%** are more than five minutes late. Between 4 and
-6 pm the median reaches **225 seconds**.
+## How it works
 
-**About 31% of the feed's "predictions" are the timetable handed back
-unchanged.** For a stop an hour ahead, 56.6% of predicted arrival times match
-the scheduled time *to the second*. Real buses are never exactly on time, so
-those rows are not predictions — OC Transpo has nothing better to say yet.
-Including them reports the median delay as **0 seconds**, which looks entirely
-reasonable and is wrong. Restricting to buses within five minutes of the stop
-moves it to **90 seconds**. Any punctuality number from this feed has to say
-which rows it used. [Full working](docs/FEED_NOTES.md).
-
-**Polling faster does not get you more data.** Vehicles report every 60 seconds
-at the median, and only 5.5% of updates arrive within 30 seconds of the last
-one. Polling every 30s returned the same reading roughly three times in seven.
-The interval is 45s because that was measured, not guessed
-([DECISIONS #1](docs/DECISIONS.md)).
-
-**Timetable versions cannot be trusted to say when they apply.** Selecting the
-timetable by its own advertised validity dates silently matched only **31% of
-observed trips** — a join that returns rows and quietly answers a different
-question. Selecting it by measured trip-id overlap instead restores 97–99%
-coverage ([DECISIONS #10](docs/DECISIONS.md)).
-
-## Why it exists
-
-GTFS-Realtime is a snapshot feed. It tells you where the buses are right now,
-and there is no endpoint that returns last Tuesday. So nobody keeps the
-history, and "how late is this route, usually?" is a question no app can answer
-— not because it is hard, but because the data is thrown away as it arrives.
-
-Most data engineering demos run on a dataset that was already finished before
-the project started. This one had to be collected first, day by day, which is
-where all the interesting problems came from.
-
-## Architecture
-
-```
-Android phone, Termux                Laptop
----------------------                ------
-capture/capture.py                   scripts/pull_from_phone.py
-  |  every 45s (vehicles)              |
-  |  every 120s (trip updates)         v
-  |  fetch -> gzip -> append          storage/writer.py
-  v                                    |  decode, deduplicate, partition by day
-raw/capture_<hour>-<run>.frames.gz     v
-  ^                                  data/parquet/<table>/dt=<date>/part.parquet
-  |                                    |
-  immutable, never edited               v
-  everything downstream                api/build_demo_db.py
-  replays from here                     |  join versioned timetables -> arrivals
-                                        v
-                                      data/demo.duckdb
-                                        |
-                                        v
-                                      api/main.py  (FastAPI on Render)
-                                      map + per-stop pages + text-to-SQL
+```text
+OC Transpo live GTFS-Realtime feeds
+        |
+        v
+Android phone running Termux
+capture/capture.py -> capture/frames.py -> raw compressed archive
+        |
+        | laptop pulls files over the local network
+        v
+scripts/pull_from_phone.py
+        |
+        v
+storage/writer.py + ingestion/decode.py
+decoded and deduplicated daily Parquet tables
+        |
+        +--------------------------+
+        |                          |
+versioned static GTFS       processing/gtfs_time.py
+        |                          |
+        +------------+-------------+
+                     v
+             api/build_demo_db.py
+             data/demo.duckdb
+                     |
+                     v
+                api/main.py
+         map · stop details · questions
 ```
 
-The split is the design: the collector does exactly one job that must never
-fail, and everything experimental sits downstream of an immutable archive. A bug
-in the transform layer costs a replay, not data — which happened, more than
-once.
+### 1. Collect and preserve
 
-Three things fall out of that:
+`capture/capture.py` polls VehiclePositions and TripUpdates on separate configurable schedules. It writes the original response bytes and request metadata to hourly files. `capture/frames.py` stores each poll as a separate gzip member, so a file being written remains readable and a restart does not invalidate earlier complete frames. Failed polls are archived as well, which makes API failures distinguishable from times when collection was not running.
 
-- **The archive survives being killed mid-write.** Each frame is its own gzip
-  member, so a half-written file reads back as every complete frame it holds.
-  ([DECISIONS #4](docs/DECISIONS.md))
-- **Rebuild, don't append.** `writer.py` rewrites whole days from raw rather
-  than appending. Slower, and it means the output always matches the current
-  code instead of being a sediment of every version that ever ran.
-- **Three tables, because there are three grains**: one row per vehicle report,
-  one per trip state change, one per predicted arrival change.
+The collector currently runs on an Android phone in Termux. The phone serves its raw archive over the local network, and the laptop pulls new or changed files with `scripts/pull_from_phone.py`. Collection can continue while the laptop is asleep.
 
-## What has been collected
+### 2. Decode and build the data lake
 
-Every number here is recomputed from the data by `scripts/verify_claims.py`.
+`ingestion/decode.py` parses the protobuf messages into records. `storage/writer.py` replays the raw archive one day at a time and writes compressed Parquet partitions for three distinct kinds of data: vehicle positions, trip state changes, and stop prediction changes.
 
-| | |
+The tables use different deduplication rules because their records mean different things. Repeated vehicle reports can be removed by vehicle and report timestamp. For predictions, only consecutive unchanged values are coalesced; a prediction that changes and later returns to an earlier value remains part of the history.
+
+### 3. Join the timetable and estimate arrivals
+
+The realtime feed contains predicted arrival times, not actual arrival times or schedule delays. `ingestion/static_gtfs.py` downloads and versions OC Transpo's static GTFS schedules. It keeps the original bundles so derived timetable tables can be recreated and observations can be matched to the schedule that fits the data.
+
+`processing/gtfs_time.py` handles GTFS service times, including times past midnight, in Ottawa's timezone. `api/build_demo_db.py` uses it to join predictions to scheduled stop times and build a DuckDB database with route and stop names, coordinates, and delay values.
+
+An arrival is an estimate: DuckStream uses the last prediction made shortly before a bus is expected at a stop. Stops without a usable close-in prediction are omitted. Cancelled trips and buses that disappear from the feed are not represented as arrivals, so the results describe observed arrivals rather than every scheduled trip or overall service reliability. Predictions far ahead can simply repeat the timetable, so they are not treated as measured arrivals.
+
+### 4. Explore and ask questions
+
+The FastAPI app in `api/main.py` serves the web page and its data endpoints:
+
+- `/` serves the map and question interface.
+- `/health` reports service and database health.
+- `/stops` returns stops and summary values for the map.
+- `/stop/{stop_id}` returns a stop's arrival summary by hour and route.
+- `/ask` turns a plain-English question into a database query.
+
+For `/ask`, `api/nl_to_sql.py` sends the database schema and its interpretation notes to the configured Groq model. The generated SQL is treated as untrusted: `api/guardrails.py` limits it to a single `SELECT`, disables filesystem access, enforces a row limit, and stops queries that run too long. The interface shows the SQL so an answer can be checked. The map and stop pages work without a Groq key; the question box requires one.
+
+## Project structure
+
+| Path | Purpose |
 |---|---|
-| Collecting since | 2026-09-13, continuously |
-| Raw archive | 294 files, 720 MB |
-| Poll coverage | 99.9% over the 10.4-day unattended window, 0.45% failed polls, longest gap 126s |
-| Records decoded | 83,112,998 |
-| Rows kept after deduplication | 50,818,969 (39% removed) |
-| Parquet lake | 200 MB, partitioned by day |
-| Measured arrivals | 585,201 across 5,544 stops and 177 routes |
-| Tests | 128 |
+| `capture/` | Realtime collection, raw frame format, archive inspection, and Termux setup. |
+| `ingestion/` | GTFS-Realtime protobuf decoding and versioned static GTFS downloads. |
+| `processing/` | GTFS service-time parsing and timezone conversion. |
+| `storage/` | Rebuild raw capture into daily Parquet tables. |
+| `query/` | Delay analysis and an unfinished SQL sketch for gap detection. |
+| `api/` | Arrival database builder, FastAPI service, web page, text-to-SQL, and SQL guardrails. |
+| `scripts/` | Phone archive pull, data-quality measurements, model comparisons, and claim verification. |
+| `docs/` | Feed analysis and design decisions, including documented reversals. |
+| `tests/` | Tests for capture, framing, decoding, timetable selection, time handling, API behavior, and SQL restrictions. |
+| `data/` | Local GTFS and Parquet outputs; the prepared `demo.duckdb` is used by the web service. |
+| `raw/` | Locally pulled immutable capture archive. |
 
-**585,201 arrivals cover 8 days, not 15.** The timetable covering
-2026-09-18 to 09-24 was withdrawn before it was fetched, and delay cannot be
-derived without it. The raw capture for those days is intact, so they come back
-whenever that timetable is recovered from an archive mirror. This is the reason
-timetables are now selected by measurement and re-checked every six hours.
+## Tools and technologies
 
-## Layout
+- **Python** runs the collector, processing scripts, API, and data checks.
+- **Requests** fetches the realtime feeds and communicates with the Groq API.
+- **GTFS-Realtime protobuf bindings** decode OC Transpo's binary feed messages.
+- **Polars and PyArrow** create and write Parquet tables.
+- **DuckDB** joins the data, builds the demo database, and answers analytical queries.
+- **FastAPI, Uvicorn, and Pydantic** provide the web API and request handling.
+- **Leaflet** renders the interactive map in `api/page.html`.
+- **Termux** runs the collector on Android; Python's HTTP server shares the raw files on the local network.
+- **Render** hosts the public demo. Its deployment configuration is in `render.yaml`.
+- **pytest** runs the project test suite.
 
-| Path | What it is |
-|---|---|
-| `capture/` | The collector. Minimal by design — Python 3 and `requests`, nothing else |
-| `ingestion/` | Protobuf decoding, and static GTFS download with version selection |
-| `processing/` | GTFS time arithmetic (service days, times past 24:00:00) |
-| `storage/` | `writer.py` — raw frames to partitioned Parquet |
-| `query/` | Delay derivation and archive analysis |
-| `api/` | FastAPI demo: text-to-SQL, execution guardrail, map, per-stop pages |
-| `scripts/` | Measurement scripts. Every published number is reproducible from one |
-| `docs/` | [DECISIONS.md](docs/DECISIONS.md) — why, including where it was wrong. [FEED_NOTES.md](docs/FEED_NOTES.md) — what the feed actually contains |
+The project does not use a message broker. The raw archive provides durability and replay; daily rebuilds provide repeatable processing.
 
-## Running it
+## Run locally
 
-**Requires Python 3.10+** for `X | Y` annotations. This matters mainly for the
-collector, which runs wherever you put it.
+Python 3.10 or newer is required. From the repository root:
 
 ```bash
 python -m venv .venv
-.venv\Scripts\activate           # Windows
-pip install -r requirements.txt
-
-copy .env.example .env           # then add your OC Transpo key
-python capture/smoke_test.py     # two API calls: is the key good?
 ```
 
-Then collect, and build:
+Activate the environment and install the project dependencies:
 
 ```bash
-python capture/capture.py        # runs until stopped
-python capture/inspect_archive.py    # how healthy is the archive?
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
 
-python ingestion/static_gtfs.py  # download the timetable
-python storage/writer.py         # raw -> Parquet, all days
-python api/build_demo_db.py      # Parquet + timetable -> demo.duckdb
+# macOS / Linux
+source .venv/bin/activate
+
+python -m pip install -r requirements.txt
 ```
 
-Serve the demo locally. Text-to-SQL needs a `GROQ_API_KEY`; the map and the stop
-pages work without one:
+Copy `.env.example` to `.env` and set `OC_TRANSPO_PRIMARY_KEY`. The optional `CAPTURE_INTERVAL_*` variables control polling, and `CAPTURE_OUTPUT_DIR` controls where raw frames are written. Run the smoke test to check the key and feed responses:
 
 ```bash
-.venv\Scripts\python.exe -m uvicorn api.main:app --reload
+python capture/smoke_test.py
 ```
 
-See [capture/DEPLOY.md](capture/DEPLOY.md) for running the collector unattended.
+To collect locally and rebuild the analytical data:
 
-## Honesty notes
+```bash
+python capture/capture.py
+python capture/inspect_archive.py
 
-Kept here on purpose, because the claims above should be checkable.
+python ingestion/static_gtfs.py
+python storage/writer.py
+python api/build_demo_db.py
+```
 
-- **Collection is real-time** — 45-second polling of a live feed. Processing is
-  batched: the laptop pulls the archive periodically and rebuilds, rather than
-  streaming continuously.
-- **There is no broker.** Redpanda was in the original plan and was cut without
-  being built. The raw archive already provides durability and replay, which
-  left the broker fan-out to a single consumer that does not exist. The full
-  reasoning, including the bad reason it was planned in the first place, is in
-  [DECISIONS #6](docs/DECISIONS.md).
-- **Uptime is measured, not assumed.** `scripts/verify_claims.py` recomputes
-  poll coverage, failure rate and longest gap from the archive itself, and
-  distinguishes "we polled and the API failed" from "we were not running".
-- **The arrival time is a proxy.** The feed never reports actual arrivals, so
-  each row uses the last prediction made within 120 seconds of the bus reaching
-  the stop. Cancelled trips and buses that vanished from the feed are absent, so
-  this measures arrivals that happened rather than overall reliability.
-- **The SQL for a question is written by a language model**, then checked before
-  it runs: one `SELECT` only, a read-only connection with external file access
-  disabled, a row limit and a 10-second watchdog. The generated SQL is shown
-  with every answer, including when it is refused.
-- **Any synthetic benchmark is labelled synthetic**, every time.
+To serve the demo locally, set `GROQ_API_KEY` and `GROQ_MODEL` in `.env` if you want to use the question box, then run:
 
-## Still open
+```bash
+python -m uvicorn api.main:app --reload
+```
 
-- `query/gap_check.sql` is a stub. Coverage is computed in
-  `scripts/verify_claims.py`; the SQL version was never written.
-- The partitioning bake-off in [DECISIONS #7](docs/DECISIONS.md) was never run.
-  Day partitioning was chosen on reasoning alone, which is exactly the kind of
-  unmeasured choice this project otherwise avoids.
-- Capture runs on an Android phone in Termux; see
-  [capture/DEPLOY.md](capture/DEPLOY.md) and [DECISIONS #12](docs/DECISIONS.md).
+The service reads `data/demo.duckdb` by default. Build it with `api/build_demo_db.py` if it is not present or needs refreshing.
+
+## Run the tests
+
+```bash
+python -m pytest
+```
+
+## Capture deployment
+
+The active collector setup is an Android phone running Termux. The phone collects the raw feeds and serves the archive on the local network; the laptop downloads it when available. See [`capture/DEPLOY.md`](capture/DEPLOY.md) for setup and operating instructions.
+
+The public demo is deployed separately as a Render web service. It serves a prebuilt DuckDB file and does not run the collector. Set `GROQ_API_KEY` and `GROQ_MODEL` in the Render environment to enable natural-language questions.
+
+## Design notes
+
+- The raw archive is the source of truth; downstream data is rebuilt from it.
+- Capture stores original feed bytes before decoding or analysis.
+- GTFS time arithmetic preserves service-day meaning for trips scheduled after midnight.
+- Timetable selection is validated against observed trip IDs because a plausible join can still use the wrong schedule.
+- Arrival and delay values are explicitly estimates derived from predictions and static schedules.
+- Generated SQL is checked and restricted before it can run against the demo database.
+
+See [`docs/DECISIONS.md`](docs/DECISIONS.md) for the reasoning behind design choices and [`docs/FEED_NOTES.md`](docs/FEED_NOTES.md) for details about the realtime feed.
